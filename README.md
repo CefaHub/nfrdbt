@@ -82,3 +82,37 @@ The paired owner may switch the behavior without redeploying:
 Both modes show the model, background and pattern with the rarity reported by Telegram when available. The command `/test` is a delivery smoke test. Telegram may still delay or rate-limit the underlying scan, and old NFT numbers are **not** backfilled by turning `/all on`.
 
 An `NFT NEW: ...` entry means the issuing counter increased; it does not imply the model matches the rare threshold. New code logs `NFT UPGRADE` for each non-crafted NFT it inspects and reports whether it was queued. A `queued=true` event is sent only when notifications are unpaused and the bot has a paired owner.
+
+
+## Contact NFT owners and propose a Stars offer
+
+Each newly detected NFT notification now includes:
+
+- The current owner as returned by \`payments.getUniqueStarGift\`.
+- A **"Написать владельцу"** button only if Telegram supplied the
+  owner's **public user @username**.
+- A **"Открыть NFT / оффер"** button to inspect the gift and use Telegram's
+  built-in official buy-offer flow when available.
+- \`offer_min_stars\` if Telegram published the minimum official offer.
+- The command \`/offer COLLECTION-NUMBER AMOUNT\` to prepare a message.
+
+Example:
+
+\`\`\`
+/offer MirageLamp-94843 1500
+\`\`\`
+
+The command fetches the **current owner** again (the original NFT owner may
+have transferred or sold it since the alert) and prepares a buyer message that
+can be copied into a direct chat. It never sends unsolicited private messages.
+
+**Privacy:** Some NFTs have no visible owner username; others are owned by
+channels or TON wallets. In those cases the bot does not guess a username,
+scrape hidden details or create fake \`tg://user\` links. You may still open the
+gift page and check whether the Telegram in-app "Make offer" action is available.
+A publicly visible username may also cease to work if the owner changes it.
+
+**Important:** An offer's visibility/eligibility, Stars price, owner identity,
+gift transfer restrictions and subsequent resale rules should always be
+rechecked inside Telegram before committing money. Neither a received link nor
+an official offer guarantees instant resale eligibility.
