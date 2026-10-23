@@ -46,3 +46,26 @@ If there are 0 successful NFT requests, the watcher has **not** confirmed it can
 If the counter has an initial value but no new numbers, the bot won't send historical NFT notifications. Subsequent numbers are scanned if the count increases.
 
 **Limits:** Telegram does not provide a public push feed of every upgrade. Request throttling, missing collections, batching, server errors and short bursts can delay or prevent detection. Market resale availability/transfer restrictions must be assessed independently. This bot neither automatically buys NFTs nor guarantees profit or instant delivery.
+
+
+## October 2026 fix for "unknown_517014..." and 0 NFT scans
+
+A normal gift ID is not an NFT collection slug. The scanner now ignores gifts
+without `upgrade_stars`, uses a documented April 2026 fallback gift ID/name
+catalogue for older Telethon responses, validates the actual `gift_id` returned
+by Telegram before following a collection, and reports *unresolved* upgraded
+gifts without creating fake `unknown_<id>` requests.
+
+After redeploying from `main`, send `/diagnose`. A healthy catalogue query
+alone does not mean NFT tracking works; check `Успешно` in `/diagnose`.
+
+To verify real NFT API access independently of scanning, send
+`/check PlushPepe`. It must respond with the collection's minted counter.
+The direct check does not alter your last-observed counter, and it does not
+mean the latest gift is rare.
+
+On the default `COLLECTIONS_PER_CYCLE=5` and `NFT_SCAN_INTERVAL=20`,
+checking 120 collections takes roughly 8 minutes, *plus request time*. Set
+`GIFT_COLLECTIONS` to a handful of real collection slugs if you want to
+prioritize a smaller watchlist. Raising poll frequency may trigger Telegram
+rate limits. This cannot guarantee immediate or exhaustive upgrade detection.
