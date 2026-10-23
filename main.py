@@ -18,6 +18,7 @@ from radar import Gift, RadarState, now_utc
 from mint_radar import collection_slug, extract_attributes, is_rare_model, make_event
 from candidate_selection import get_candidates
 from owner_contact import owner_contact, resolve_owner_contact, offer_text
+from deal_watch import valid_gift_slug, deal_snapshot, deal_opportunities, deal_details
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -47,6 +48,7 @@ NFT_SCAN_INTERVAL = max(5, int(os.getenv("NFT_SCAN_INTERVAL", "20")))
 COLLECTIONS_PER_CYCLE = max(1, int(os.getenv("COLLECTIONS_PER_CYCLE", "5")))
 MAX_NEW_NFTS_PER_CYCLE = max(1, int(os.getenv("MAX_NEW_NFTS_PER_CYCLE", "25")))
 MAX_MODEL_RARITY_PCT = float(os.getenv("MAX_MODEL_RARITY_PCT", "1.0"))
+DEAL_WATCH_INTERVAL = max(60, int(os.getenv("DEAL_WATCH_INTERVAL", "180")))
 GIFT_COLLECTIONS = [x.strip() for x in os.getenv("GIFT_COLLECTIONS", "").split(",") if x.strip()]
 # Bothost preserves /app/data during redeploys.
 DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if os.getenv("BOT_ID") else "data")).resolve()
@@ -377,6 +379,57 @@ async def monitor(user: TelegramClient, bot: TelegramClient) -> None:
         await asyncio.sleep(delay)
 
 
+
+async def fetch_deal_snapshot(user: TelegramClient, slug: str) -> dict:
+    if not valid_gift_slug(slug):
+        raise ValueError("Неправильный номер NFT")
+    details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
+    contact = await resolve_owner_contact(details.gift, details, user)
+    return deal_snapshot(details.gift, contact)
+
+
+def deal_watch_buttons(slug: str, snapshot: dict):
+    buttons = [[Button.url("🎁 Открыть NFT / покупка", f"https://t.me/nft/{slug}")]]
+    link = snapshot.get("owner_url") or snapshot.get("owner_profile_url")
+    if link and snapshot.get("owner_type") == "user":
+        buttons.append([Button.url("👤 Профиль владельца", link)])
+    return buttons
+
+
+async def monitor_deals(user: TelegramClient, bot: TelegramClient) -> None:
+    """Watch manually selected gifts for a newly available legitimate trade path."""
+    while True:
+        watchlist = dict(state.data.get("deal_watchlist") or {})
+        for slug, previous in watchlist.items():
+            try:
+                current = await fetch_deal_snapshot(user, slug)
+                if slug not in state.data.get("deal_watchlist", {}):
+                    continue
+                changes = deal_opportunities(previous, current)
+                if changes and not state.data.get("paused") and state.owner_id is not None:
+                    description = "\n".join("• " + html.escape(x) for x in changes)
+                    await bot.send_message(
+                        state.owner_id,
+                        f"🚨 <b>Появился способ купить NFT!</b>\n"
+                        f"🎁 <a href=\"https://t.me/nft/{html.escape(slug, quote=True)}\">"
+                        f"{html.escape(slug)}</a>\n"
+                        f"{description}\n\n"
+                        f"{html.escape(deal_details(current))}",
+                        parse_mode="html",
+                        link_preview=False,
+                        buttons=deal_watch_buttons(slug, current),
+                    )
+                state.data["deal_watchlist"][slug] = current
+                state.save()
+            except FloodWaitError as exc:
+                log.warning("Deal watch: Telegram FloodWait %d seconds", exc.seconds)
+                await asyncio.sleep(exc.seconds + 3)
+            except Exception as exc:
+                log.warning("Deal watch failed for %s: %s", slug, exc)
+            await asyncio.sleep(0.25)
+        await asyncio.sleep(DEAL_WATCH_INTERVAL)
+
+
 def command_name(text: str) -> tuple[str, str]:
     head, _, tail = text.strip().partition(" ")
     return head.split("@", 1)[0].lower(), tail.strip()
@@ -431,6 +484,9 @@ async def run() -> None:
                 "/diagnose — диагностика NFT\n"
                 "/all on — оповещать обо всех улучшенных NFT\n"
                 "/owner PlushPepe-123 — ссылка на профиль владельца\n"
+                "/deal PlushPepe-123 — способы связаться или купить\n"
+                "/watch PlushPepe-123 — следить за продажей\n"
+                "/watches — отслеживаемые NFT; /unwatch СЛАГ — отменить\n"
                 "/offer PlushPepe-123 1500 — черновик сделки\n"
                 "/all off — только редкие модели\n"
                 "/check PlushPepe — проверить коллекцию напрямую\n"
@@ -682,7 +738,8 @@ async def run() -> None:
                 "Бот привязан к ID %s; одноразовый ключ: %s",
                 state.owner_id, state.activation_status()
             )
-        tasks = [asyncio.create_task(monitor(user, bot))]
+        tasks = [asyncio.create_task(monitor(user, bot)),
+                 asyncio.create_task(monitor_deals(user, bot))]
         if TRACK_RARE_NFTS:
             tasks.append(asyncio.create_task(monitor_rare_nfts(user, bot)))
         await asyncio.gather(*tasks)
