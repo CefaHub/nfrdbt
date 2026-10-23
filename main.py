@@ -107,6 +107,8 @@ def message_for_gift(item: dict) -> str:
             f"{offer_line}\n"
             f"{contact_note}\n"
             f"📝 Черновик: <code>/offer {html.escape(item['slug'])}</code>\n"
+            f"🔎 Способы покупки: <code>/deal {html.escape(item['slug'])}</code>\n"
+            f"🔔 Следить за продажей: <code>/watch {html.escape(item['slug'])}</code>\n"
             f"🕒 Обнаружен: {html.escape(item['created_at'])} UTC\n\n"
             "Проверь актуального владельца перед покупкой: подарок могли передать."
         )
@@ -666,7 +668,8 @@ async def run() -> None:
                         "🔐 Telegram передал отображаемое имя или кошелёк, "
                         "но не подтверждённый профиль владельца. "
                         "Даже если у человека есть @username, по одному имени "
-                        "нельзя безопасно определить его аккаунт.",
+                        "нельзя безопасно определить его аккаунт. "
+                        f"Включи проверку продажи: /watch {slug}",
                         parse_mode="html",
                         buttons=[[Button.url("🎁 Открыть NFT", f"https://t.me/nft/{slug}")]],
                     )
