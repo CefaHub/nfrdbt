@@ -122,6 +122,31 @@ def origin_lines(item: dict) -> str:
     return "".join(display)
 
 
+def market_deal_message(item: dict) -> str:
+    url = f"https://t.me/nft/{item['slug']}"
+    seller_url = item.get("seller_url")
+    seller = (
+        f'<a href="{html.escape(seller_url, quote=True)}">'
+        f'{html.escape(item.get("seller_label") or "Публичный продавец")}</a>'
+        if seller_url else "не указан в публичных данных"
+    )
+    return (
+        "📉 <b>ВОЗМОЖНО ВЫГОДНЫЙ NFT-ЛИСТИНГ</b>\n\n"
+        f"{url}\n\n"
+        f"🎁 <b>{html.escape(item['title'])} #{item['number']}</b>\n"
+        f"🎭 Модель: {html.escape(item.get('model', '?'))}\n"
+        f"🏪 Площадка: {html.escape(item['market'])}\n"
+        f"💰 Цена: <b>{html.escape(item['price_display'])}</b>\n"
+        f"📊 На {item['discount_pct']:g}% ниже медианы наблюдаемых продаж\n"
+        f"📉 Медиана: {item['median_ton']:g} TON "
+        f"(n={item['sample_size']}; {html.escape(item['comparison_scope'])})\n"
+        f"👤 Публичный продавец: {seller}\n\n"
+        "⚠️ Предварительный сигнал, НЕ гарантия прибыли. "
+        "Комиссии, ликвидность и редкость этого NFT не учтены.\n"
+        "🛒 Открой подарок и проверь актуальную цену."
+    )
+
+
 def message_for_gift(item: dict) -> str:
     if item.get("kind") == "market_deal":
         return market_deal_message(item)
