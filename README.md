@@ -236,3 +236,16 @@ the time to scan all collections depends on `NFT_SCAN_INTERVAL` and
 121 collections can take around 8 minutes per sweep, not including
 extra NFT detail requests or Telegram rate limits. More aggressive
 settings can incur FloodWait, so tune with live logs.
+
+
+### Verify end-to-end delivery without waiting for a new NFT
+
+After redeploying the bot on Bothost, send `/all on`, then `/testdelivery`.
+The command inserts one artificial event at the front of the SAME persisted
+outbox that handles real NFT alerts. A second, separate message saying
+"ПРОВЕРКА ОЧЕРЕДИ УСПЕШНА" confirms the worker can send.
+
+If that separate message does not arrive, use `/delivery`. It shows the
+pending count, first queued event, Telegram delivery error, last send
+and retry delay. Unlike the older `/test` command, this checks the actual
+notification queue rather than merely replying to a Telegram command.
