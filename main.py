@@ -19,6 +19,7 @@ from mint_radar import collection_slug, extract_attributes, is_rare_model, make_
 from candidate_selection import get_candidates
 from owner_contact import owner_contact, resolve_owner_contact, offer_text
 from gift_origin import original_participants, resolve_original_participants, original_buttons
+from gift_host import hosted_profile
 from deal_watch import valid_gift_slug, deal_snapshot, deal_opportunities, deal_details
 from delivery import dispatch_next, fallback_text
 from scan_pacing import remaining_pause
@@ -75,6 +76,18 @@ DELIVERY_STATS = {
     "last_slug": None,
     "next_delay_sec": 0,
 }
+
+
+def hosted_lines(item: dict) -> str:
+    host = item.get("hosted_profile")
+    if not isinstance(host, dict) or not host.get("url"):
+        return ""
+    url = html.escape(host["url"], quote=True)
+    label = html.escape(host.get("label") or "Публичный профиль")
+    return (
+        f'🏷 Публично показывает подарок: <a href="{url}">{label}</a>\n'
+        "ℹ️ Это профиль-хост, не доказательство владения NFT.\n"
+    )
 
 
 def origin_lines(item: dict) -> str:
@@ -145,6 +158,7 @@ def message_for_gift(item: dict) -> str:
             f"✳️ Символ: {html.escape(item['pattern'])} "
             f"({html.escape(item['pattern_rarity'])})\n"
             f"👤 Владелец: {owner_display}\n"
+            f"{hosted_lines(item)}"
             f"{origin_lines(item)}"
             f"{id_line}"
             f"{offer_line}\n"
@@ -190,6 +204,9 @@ def nft_buttons(item: dict):
         elif item.get("owner_profile_url"):
             buttons.append([Button.url("👤 Открыть профиль по ID", item["owner_profile_url"])])
     buttons.extend(original_buttons(item.get("original_participants") or [], Button.url))
+    host = item.get("hosted_profile")
+    if isinstance(host, dict) and host.get("url"):
+        buttons.append([Button.url("🏷 Профиль, показывающий NFT", host["url"])])
     return buttons
 
 
@@ -445,16 +462,28 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                                 rare = is_rare_model(attrs, MAX_MODEL_RARITY_PCT)
                                 event = make_event(collectible, attrs, now_utc(), rare=rare)
                                 # Owner lookup must never stall mint scanning.
+                                # Parallel public-link lookups, bounded by one
+                                # timeout. Historical people are never treated
+                                # as the current gift holder.
                                 try:
-                                    contact = await asyncio.wait_for(
-                                        resolve_owner_contact(collectible, details, user),
-                                        timeout=3.0,
+                                    lookup = await asyncio.wait_for(
+                                        asyncio.gather(
+                                            resolve_owner_contact(collectible, details, user),
+                                            resolve_original_participants(collectible, details, user),
+                                            hosted_profile(collectible, details, user),
+                                        ),
+                                        timeout=3.5,
                                     )
+                                    contact, history, hosted = lookup
                                 except Exception as exc:
-                                    log.debug("Owner lookup delayed for %s: %s", collectible.slug, exc)
+                                    log.debug("Public contact lookup delayed for %s: %s", collectible.slug, exc)
                                     contact = owner_contact(collectible, details)
+                                    history = original_participants(collectible, details)
+                                    hosted = None
                                 event.update(contact)
-                                event["original_participants"] = original_participants(collectible, details)
+                                event["original_participants"] = history
+                                if hosted:
+                                    event["hosted_profile"] = hosted
                                 NFT_HEALTH["total_new_nfts"] += 1
                                 NFT_HEALTH["last_nft"] = str(collectible.slug)
                                 if rare:
