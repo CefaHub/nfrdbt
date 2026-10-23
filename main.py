@@ -333,6 +333,7 @@ async def run() -> None:
                 "📡 <b>Gift Upgrade Radar</b>\n\n"
                 "/status — состояние\n"
                 "/diagnose — диагностика NFT\n"
+                "/check PlushPepe — проверить коллекцию напрямую\n"
                 "/last — последние события\n"
                 "/test — пробное уведомление\n"
                 "/pause — отключить уведомления\n"
@@ -374,6 +375,32 @@ async def run() -> None:
                 f"Последняя ошибка: {html.escape(NFT_HEALTH['last_error'] or 'нет')}\n"
                 f"Примеры: {html.escape(head)}", parse_mode="html"
             )
+        elif cmd == "/check":
+            # Single direct API query to test access to a known collection.
+            slug = collection_slug(argument)
+            if not slug or len(slug) > 64:
+                await event.respond("Укажи название коллекции: /check PlushPepe")
+                return
+            try:
+                resolved, sample = await get_head_for_collection(user, slug, None)
+                minted = int(sample.availability_issued)
+                await event.respond(
+                    "✅ <b>NFT API отвечает!</b>\n"
+                    f"Коллекция: <b>{html.escape(str(sample.title))}</b>\n"
+                    f"Slug: <code>{html.escape(resolved)}</code>\n"
+                    f"Выпущено NFT: <b>{minted}</b>\n"
+                    f"Проверочный NFT: <a href=\"https://t.me/nft/{html.escape(str(sample.slug), quote=True)}\">открыть</a>\n\n"
+                    "Это тест доступности коллекции, а не уведомление о новом выпуске.",
+                    parse_mode="html", link_preview=False,
+                )
+            except FloodWaitError as exc:
+                await event.respond(f"⏳ Telegram временно ограничил запросы на {exc.seconds} секунд.")
+            except Exception as exc:
+                await event.respond(
+                    f"❌ Не удалось проверить коллекцию: "
+                    f"{html.escape(type(exc).__name__ + ': ' + str(exc)[:120])}",
+                    parse_mode="html",
+                )
         elif cmd == "/last":
             recent = state.data["history"][-10:]
             if not recent:
