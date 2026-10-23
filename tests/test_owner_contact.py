@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from owner_contact import offer_text, owner_contact, public_username
+from owner_contact import offer_text, owner_contact, public_username, resolve_owner_contact
 
 
 class PeerUser:
@@ -104,6 +104,51 @@ class OwnerContactTests(unittest.TestCase):
         self.assertIn("1500 ⭐", msg)
         self.assertIn("https://t.me/nft/PlushPepe-123", msg)
         self.assertIn("официальный оффер", msg.lower())
+
+
+class OwnerContactAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_telegram_user_resolves_public_username(self):
+        owner = SimpleNamespace(owner_id=PeerUser(55), owner_name=None,
+                                owner_address=None, offer_min_stars=None)
+        response = SimpleNamespace(users=[], chats=[])
+        class FakeClient:
+            async def get_entity(self, peer):
+                self_peer = peer
+                return SimpleNamespace(id=self_peer.user_id, username="ExistingPublicName")
+        contact = await resolve_owner_contact(owner, response, FakeClient())
+        self.assertEqual(contact["owner_url"], "https://t.me/ExistingPublicName")
+        self.assertEqual(contact["owner_user_id"], 55)
+
+    async def test_display_name_does_not_guess_a_username(self):
+        owner = SimpleNamespace(owner_id=None, owner_name="Famous Display Name",
+                                owner_address=None, offer_min_stars=None)
+        response = SimpleNamespace(users=[], chats=[])
+        class FakeClient:
+            async def get_entity(self, peer):
+                raise AssertionError("Must never resolve a display name as a user ID")
+        contact = await resolve_owner_contact(owner, response, FakeClient())
+        self.assertEqual(contact["owner_label"], "Famous Display Name")
+        self.assertIsNone(contact["owner_url"])
+
+    async def test_wrong_cached_user_is_rejected(self):
+        owner = SimpleNamespace(owner_id=PeerUser(55), owner_name=None,
+                                owner_address=None, offer_min_stars=None)
+        response = SimpleNamespace(users=[], chats=[])
+        class FakeClient:
+            async def get_entity(self, peer):
+                return SimpleNamespace(id=123, username="DifferentOwner")
+        contact = await resolve_owner_contact(owner, response, FakeClient())
+        self.assertIsNone(contact["owner_url"])
+
+    async def test_unavailable_telegram_entity_falls_back_to_id(self):
+        owner = SimpleNamespace(owner_id=PeerUser(55), owner_name=None,
+                                owner_address=None, offer_min_stars=None)
+        response = SimpleNamespace(users=[], chats=[])
+        class FakeClient:
+            async def get_entity(self, peer):
+                raise ValueError("Cannot access entity")
+        contact = await resolve_owner_contact(owner, response, FakeClient())
+        self.assertEqual(contact["owner_profile_url"], "tg://user?id=55")
 
 
 if __name__ == "__main__":
