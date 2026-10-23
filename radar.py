@@ -113,7 +113,7 @@ class RadarState:
         self.data["last_check"] = now_utc()
         if new_events:
             self.data["history"] = (self.data["history"] + new_events)[-50:]
-            self.data["pending"] = (self.data["pending"] + new_events)[-100:]
+            self.data["pending"] = self.data["pending"] + new_events
         self.save()
         return new_events
 
@@ -121,7 +121,7 @@ class RadarState:
         event = dict(event, event_id=uuid4().hex)
         self.data["history"] = (self.data["history"] + [event])[-50:]
         if not self.data["paused"]:
-            self.data["pending"] = (self.data["pending"] + [event])[-100:]
+            self.data["pending"] = self.data["pending"] + [event]
         self.save()
 
     def set_collection_issued(self, slug: str, issued: int) -> None:
