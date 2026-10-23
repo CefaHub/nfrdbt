@@ -613,6 +613,62 @@ async def monitor(user: TelegramClient, bot: TelegramClient) -> None:
 
 
 
+async def live_market_event(event: dict) -> None:
+    """No paid see.tg REST calls, wallet actions or automated purchases."""
+    if LIVE_COLLECTIONS and event["collection"] not in LIVE_COLLECTIONS:
+        return
+    if event["type"] == "sale":
+        if record_sale(state.data, event):
+            LIVE_COUNTERS["sales_recorded"] += 1
+            state.save()
+        return
+
+    if event["type"] == "new" and LIVE_NOTIFY_NEW and all_nft_notifications():
+        minute = int(asyncio.get_running_loop().time() // 60)
+        if LIVE_COUNTERS["minute_bucket"] != minute:
+            LIVE_COUNTERS["minute_bucket"] = minute
+            LIVE_COUNTERS["minute_count"] = 0
+        if LIVE_COUNTERS["minute_count"] >= LIVE_MAX_NEW_PER_MINUTE:
+            LIVE_COUNTERS["new_skipped_limit"] += 1
+            return
+        alert = live_nft_notification(event)
+        if state.record_nft_once(alert):
+            LIVE_COUNTERS["minute_count"] += 1
+            LIVE_COUNTERS["new_notified"] += 1
+            LIVE_COUNTERS["last_new"] = now_utc()
+            log.info("LIVE NEW %s queued=%d", event["slug"], len(state.data["pending"]))
+            await deliver_pending(None)
+        return
+
+    if event["type"] in {"listing", "price"}:
+        listings = state.data.setdefault("live_last_listings", {})
+        listings[event["slug"]] = {"event": event, "observed_at": now_utc()}
+        while len(listings) > 300:
+            del listings[next(iter(listings))]
+        LIVE_COUNTERS["last_listing"] = now_utc()
+        if not LIVE_NOTIFY_BARGAINS:
+            return
+        estimate = estimate_listing(
+            state.data, event, threshold=LIVE_BARGAIN_RATIO
+        )
+        alert = deal_notification(event, estimate)
+        if not alert:
+            return
+        key = ":".join((
+            event["slug"], event["type"], event.get("at") or "",
+            (event.get("price") or {}).get("display") or "",
+        ))
+        seen = state.data.setdefault("live_seen_deals", [])
+        if key in seen:
+            return
+        seen.append(key)
+        del seen[:-1000]
+        state.record_rare_nft(alert)
+        LIVE_COUNTERS["deals_notified"] += 1
+        log.info("LIVE PRICE SIGNAL %s ratio=%.2f", event["slug"], estimate["ratio"])
+        await deliver_pending(None)
+
+
 async def fetch_deal_snapshot(user: TelegramClient, slug: str) -> dict:
     if not valid_gift_slug(slug):
         raise ValueError("Неправильный номер NFT")
@@ -1154,6 +1210,10 @@ async def run() -> None:
         tasks = [asyncio.create_task(delivery_worker(bot)),
                  asyncio.create_task(monitor(user, bot)),
                  asyncio.create_task(monitor_deals(user, bot))]
+        if LIVE_ENABLED:
+            tasks.append(asyncio.create_task(
+                run_stream(live_market_event, LIVE_API_TOKEN, LIVE_COLLECTIONS or None)
+            ))
         DELIVERY_WAKE.set()  # Flush persisted unsent NFT alerts on startup.
         if TRACK_RARE_NFTS:
             tasks.append(asyncio.create_task(monitor_rare_nfts(user, bot)))
