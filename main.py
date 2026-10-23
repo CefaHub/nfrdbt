@@ -66,7 +66,7 @@ def message_for_gift(item: dict) -> str:
             else "🎁 <b>НОВЫЙ NFT ПОСЛЕ УЛУЧШЕНИЯ</b>"
         )
         owner = html.escape(item.get("owner_label") or "Не раскрыт")
-        owner_url = item.get("owner_url")
+        owner_url = item.get("owner_profile_url") or item.get("owner_url")
         if owner_url:
             owner_display = (
                 f'<a href="{html.escape(owner_url, quote=True)}">{owner}</a>'
@@ -79,10 +79,18 @@ def message_for_gift(item: dict) -> str:
             if isinstance(offer_min, int) else
             "💰 Оффер: проверь доступность в Telegram"
         )
+        has_public_username = bool(item.get("owner_url") and item.get("owner_type") == "user")
+        has_id_mention = bool(item.get("owner_user_id") and not has_public_username)
         contact_note = (
-            "✉️ Нажми «Написать владельцу» ниже."
-            if owner_url and item.get("owner_type") == "user"
-            else "🔐 Прямой контакт пользователя не открыт; проверь NFT и кнопку оффера."
+            "✉️ Нажми «Открыть чат владельца» ниже."
+            if has_public_username else
+            "✉️ Доступна попытка открыть профиль через Telegram ID; ссылка может не работать из-за приватности."
+            if has_id_mention else
+            "🔐 Прямой контакт не раскрыт; проверь NFT и официальный оффер."
+        )
+        id_line = (
+            f"🆔 Telegram ID: <code>{int(item['owner_user_id'])}</code>\n"
+            if item.get("owner_user_id") else ""
         )
         return (
             f"{headline}\n\n"
@@ -94,6 +102,7 @@ def message_for_gift(item: dict) -> str:
             f"✳️ Символ: {html.escape(item['pattern'])} "
             f"({html.escape(item['pattern_rarity'])})\n"
             f"👤 Владелец: {owner_display}\n"
+            f"{id_line}"
             f"{offer_line}\n"
             f"{contact_note}\n"
             f"📝 Черновик: <code>/offer {html.escape(item['slug'])}</code>\n"
@@ -126,10 +135,14 @@ def nft_buttons(item: dict):
     buttons = [
         [Button.url("🎁 Открыть NFT / оффер", f"https://t.me/nft/{item['slug']}")]
     ]
-    # Telegram only gives us an actionable link when owner's public
-    # username is present in its response. Never construct hidden profiles.
-    if item.get("owner_type") == "user" and item.get("owner_url"):
-        buttons.append([Button.url("✉️ Написать владельцу", item["owner_url"])])
+    # MTProto exposes a PeerUser ID even when the owner has no username.
+    # tg://user?id is a *conditional* Bot API mention; privacy and client
+    # user-cache restrictions may prevent it from opening a profile.
+    if item.get("owner_type") == "user":
+        if item.get("owner_url"):
+            buttons.append([Button.url("✉️ Открыть чат владельца", item["owner_url"])])
+        elif item.get("owner_profile_url"):
+            buttons.append([Button.url("👤 Открыть профиль по ID", item["owner_profile_url"])])
     return buttons
 
 
@@ -501,17 +514,23 @@ async def run() -> None:
                     )
                     return
                 draft = html.escape(offer_text(unique, amount))
-                url = contact.get("owner_url")
+                url = contact.get("owner_profile_url") or contact.get("owner_url")
                 peer_kind = contact.get("owner_type")
                 buttons = [[Button.url("🎁 Открыть NFT / оффер", f"https://t.me/nft/{slug}")]]
                 if url and peer_kind == "user":
-                    buttons.append([Button.url("✉️ Написать владельцу", url)])
-                if peer_kind == "user" and url:
-                    note = "Открой публичный профиль и отправь предложение вручную."
+                    label = "✉️ Открыть чат владельца" if contact.get("owner_url") else "👤 Открыть профиль по ID"
+                    buttons.append([Button.url(label, url)])
+                if peer_kind == "user" and contact.get("owner_url"):
+                    note = "Ссылка на публичный чат пользователя — можно написать лично."
+                elif peer_kind == "user" and contact.get("owner_user_id"):
+                    note = (
+                        f"Telegram ID владельца: {contact['owner_user_id']}. "
+                        "Ссылка на профиль по ID может не работать из-за ограничений Telegram."
+                    )
                 else:
                     note = (
-                        "Контакт для личного сообщения недоступен. "
-                        "Проверь наличие кнопки официального оффера на странице NFT."
+                        "Прямой контакт Telegram не раскрыт. "
+                        "Проверь наличие официального оффера на странице NFT."
                     )
                 await event.respond(
                     "📝 <b>Сообщение для продавца</b>\n"
