@@ -14,14 +14,23 @@ from typing import Any
 FORMATTING_ERRORS = (
     "BUTTON_URL_INVALID", "BUTTON_TYPE_INVALID", "BUTTON_DATA_INVALID",
     "ENTITY_BOUNDS_INVALID", "MESSAGE_EMPTY", "MESSAGE_TOO_LONG",
-    "REPLY_MARKUP_INVALID", "URL_INVALID",
+    "REPLY_MARKUP_INVALID", "URL_INVALID", "MESSAGE_ENTITY_INVALID",
 )
 
 
 def is_bad_markup(exc: BaseException) -> bool:
-    name = type(exc).__name__.upper()
-    text = str(exc).upper()
-    return any(x in name or x in text for x in FORMATTING_ERRORS)
+    # Telethon class names are CamelCase (ButtonUrlInvalidError), while RPC
+    # codes use SCREAMING_SNAKE_CASE (BUTTON_URL_INVALID).
+    # Normalize both so the fallback works for either representation.
+    def normalized(value: str) -> str:
+        return "".join(ch for ch in value.upper() if ch.isalnum())
+
+    name = normalized(type(exc).__name__)
+    message = normalized(str(exc))
+    return any(
+        normalized(code) in name or normalized(code) in message
+        for code in FORMATTING_ERRORS
+    )
 
 
 def fallback_text(item: dict[str, Any]) -> str:
