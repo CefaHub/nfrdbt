@@ -17,7 +17,7 @@ from telethon.sessions import StringSession
 from radar import Gift, RadarState, now_utc
 from mint_radar import collection_slug, extract_attributes, is_rare_model, make_event
 from candidate_selection import get_candidates
-from owner_contact import owner_contact, offer_text
+from owner_contact import owner_contact, resolve_owner_contact, offer_text
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -52,7 +52,6 @@ GIFT_COLLECTIONS = [x.strip() for x in os.getenv("GIFT_COLLECTIONS", "").split("
 DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if os.getenv("BOT_ID") else "data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 state = RadarState(DATA_DIR / "state.json")
-PAIR_CODE = os.getenv("PAIR_CODE", "").strip() or secrets.token_hex(4)
 DELIVERY_LOCK = asyncio.Lock()
 
 
@@ -312,7 +311,7 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                                 attrs = extract_attributes(collectible)
                                 rare = is_rare_model(attrs, MAX_MODEL_RARITY_PCT)
                                 event = make_event(collectible, attrs, now_utc(), rare=rare)
-                                event.update(owner_contact(collectible, details))
+                                event.update(await resolve_owner_contact(collectible, details, user))
                                 NFT_HEALTH["total_new_nfts"] += 1
                                 NFT_HEALTH["last_nft"] = str(collectible.slug)
                                 if rare:
@@ -389,7 +388,8 @@ async def run() -> None:
     user = TelegramClient(user_session, API_ID, API_HASH)
     bot = TelegramClient(str(DATA_DIR / "bot"), API_ID, API_HASH)
 
-    # Owner authentication: only the first private sender with PAIR_CODE can bind the bot.
+    # A single-use secret's SHA-256 is in activation.py, NEVER the secret.
+    # Used/owner state lives at /app/data/state.json and survives Bothost deploys.
     @bot.on(events.NewMessage(incoming=True))
     async def on_command(event):
         if not event.is_private:
@@ -398,18 +398,33 @@ async def run() -> None:
         if not cmd.startswith("/"):
             return
         if state.owner_id is None:
-            if cmd == "/start" and secrets.compare_digest(argument, PAIR_CODE):
-                state.set_owner(event.sender_id)
-                await event.respond("✅ Радар привязан к тебе! Напиши /status или /help")
-                log.info("Бот привязан к пользователю %d", event.sender_id)
+            if cmd == "/start" and state.consume_activation_key(argument, event.sender_id):
+                await event.respond("✅ Одноразовый ключ погашен! Бот привязан к твоему аккаунту. /help")
+                log.info("Активация: бот привязан к Telegram ID %d", event.sender_id)
                 await deliver_pending(bot)
             else:
-                await event.respond("🔐 Для подключения отправь /start КОД. Код указан в консоли запуска.")
+                await event.respond(
+                    "🔐 Для первой привязки отправь /start КЛЮЧ. "
+                    "Ключ выдан отдельно владельцу; в логах он не публикуется."
+                )
             return
         if event.sender_id != state.owner_id:
             await event.respond("⛔ Нет доступа.")
             return
-        if cmd in ("/start", "/help"):
+        if cmd == "/activate":
+            # Existing owner can consume the same single-use key once.
+            if state.consume_activation_key(argument, event.sender_id):
+                await event.respond("✅ Одноразовый ключ активирован и навсегда погашен в состоянии этого бота.")
+            elif state.data.get("activation_consumed", False):
+                await event.respond("🔒 Этот ключ уже использован. Повторная активация невозможна.")
+            else:
+                await event.respond("❌ Неверный одноразовый ключ.")
+        elif cmd == "/key":
+            await event.respond(
+                "🔐 Статус одноразового ключа: " + state.activation_status()
+                + ". При Git-обновлениях статус хранится в /app/data/state.json."
+            )
+        elif cmd in ("/start", "/help"):
             await event.respond(
                 "📡 <b>Gift Upgrade Radar</b>\n\n"
                 "/status — состояние\n"
@@ -423,6 +438,8 @@ async def run() -> None:
                 "/test — пробное уведомление\n"
                 "/pause — отключить уведомления\n"
                 "/resume — включить уведомления\n"
+                "/key — статус одноразового ключа\n"
+                "/activate КЛЮЧ — использовать выданный ключ\n"
                 "/help — команды\n\n"
                 "Отслеживаю выпуск улучшенных NFT; включить все: /all on.", parse_mode="html"
             )
@@ -497,7 +514,7 @@ async def run() -> None:
                 return
             try:
                 details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
-                contact = owner_contact(details.gift, details)
+                contact = await resolve_owner_contact(details.gift, details, user)
                 url = contact.get("owner_profile_url")
                 real_username = contact.get("owner_url")
                 user_id = contact.get("owner_user_id")
@@ -552,7 +569,7 @@ async def run() -> None:
             try:
                 details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
                 unique = details.gift
-                contact = owner_contact(unique, details)
+                contact = await resolve_owner_contact(unique, details, user)
                 minimum = contact.get("offer_min_stars")
                 if amount is not None and minimum is not None and amount < minimum:
                     await event.respond(
@@ -653,9 +670,15 @@ async def run() -> None:
         me = await bot.get_me()
         log.info("Готово! Бот: @%s", me.username)
         if state.owner_id is None:
-            print("\n" + "=" * 60, flush=True)
-            print(f"ПРИВЯЗКА: открой @{me.username} и отправь /start {PAIR_CODE}", flush=True)
-            print("=" * 60 + "\n", flush=True)
+            log.info(
+                "Бот не привязан. Используй /start с одноразовым ключом, "
+                "выданным владельцу отдельно. Ключ в логи не выводится."
+            )
+        else:
+            log.info(
+                "Бот привязан к ID %s; одноразовый ключ: %s",
+                state.owner_id, state.activation_status()
+            )
         tasks = [asyncio.create_task(monitor(user, bot))]
         if TRACK_RARE_NFTS:
             tasks.append(asyncio.create_task(monitor_rare_nfts(user, bot)))
