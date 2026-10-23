@@ -69,3 +69,16 @@ checking 120 collections takes roughly 8 minutes, *plus request time*. Set
 `GIFT_COLLECTIONS` to a handful of real collection slugs if you want to
 prioritize a smaller watchlist. Raising poll frequency may trigger Telegram
 rate limits. This cannot guarantee immediate or exhaustive upgrade detection.
+
+## Mint notifications (all vs. rare only)
+
+By default `NOTIFY_ALL_NFTS=true` causes the scanner to notify the paired user about **every new, non-crafted NFT discovered after the collection baseline**. A rarity of 1% is not required.
+
+The paired owner may switch the behavior without redeploying:
+- `/all on` — notify for each new NFT, including common models.
+- `/all off` — notify only when the model chance is <= 1% or rarity tier Epic/Legendary.
+- `/status`, `/diagnose` and `/last` — check active mode and events.
+
+Both modes show the model, background and pattern with the rarity reported by Telegram when available. The command `/test` is a delivery smoke test. Telegram may still delay or rate-limit the underlying scan, and old NFT numbers are **not** backfilled by turning `/all on`.
+
+An `NFT NEW: ...` entry means the issuing counter increased; it does not imply the model matches the rare threshold. New code logs `NFT UPGRADE` for each non-crafted NFT it inspects and reports whether it was queued. A `queued=true` event is sent only when notifications are unpaused and the bot has a paired owner.
