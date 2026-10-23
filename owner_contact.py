@@ -32,6 +32,8 @@ def owner_contact(unique: Any, response: Any) -> dict[str, Any]:
         "owner_label": "Не раскрыт",
         "owner_url": None,
         "owner_type": "hidden",
+        "owner_user_id": None,
+        "owner_profile_url": None,
         "offer_min_stars": None,
     }
     minimum = getattr(unique, "offer_min_stars", None)
@@ -46,6 +48,12 @@ def owner_contact(unique: Any, response: Any) -> dict[str, Any]:
         peer_id = getattr(peer, "user_id", None)
         entities = getattr(response, "users", []) or []
         result["owner_type"] = "user"
+        if isinstance(peer_id, int) and peer_id > 0:
+            # A Telegram Bot API user mention. The ID is in the gift's
+            # official public owner_id field; no username guessing.
+            # Telegram may refuse to open this for unrelated/private users.
+            result["owner_user_id"] = peer_id
+            result["owner_profile_url"] = f"tg://user?id={peer_id}"
     elif kind == "PeerChannel":
         peer_id = getattr(peer, "channel_id", None)
         entities = getattr(response, "chats", []) or []
@@ -68,6 +76,7 @@ def owner_contact(unique: Any, response: Any) -> dict[str, Any]:
         if username:
             result["owner_label"] = "@" + username
             result["owner_url"] = "https://t.me/" + username
+            result["owner_profile_url"] = result["owner_url"]
             return result
         first_name = getattr(entity, "first_name", None) or getattr(entity, "title", None)
         if first_name:
