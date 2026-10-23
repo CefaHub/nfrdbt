@@ -249,3 +249,23 @@ If that separate message does not arrive, use `/delivery`. It shows the
 pending count, first queued event, Telegram delivery error, last send
 and retry delay. Unlike the older `/test` command, this checks the actual
 notification queue rather than merely replying to a Telegram command.
+
+## Telegram NFT image card previews
+
+Each newly discovered NFT alert now contains the original
+`https://t.me/nft/Collection-Number` URL **as the first link in its message**.
+The sender enables `link_preview=True` for `new_nft` and `rare_nft`
+while keeping the existing buttons for gift / owner profile.
+Even if a bad inline button forces a plain-text fallback, the NFT
+link remains in the message and link previews are enabled.
+
+To test a specific gift without waiting for a mint, send
+`/preview PartySparkler-189558` in the authorized bot chat.
+The bot sends a test message with that gift link, preview enabled,
+and a button to open the gift. `/testdelivery` still validates
+queue delivery, but does **not** test an NFT image preview.
+
+Telegram generates and caches the visual card itself. The program
+cannot guarantee that the recipient's Telegram client renders
+the exact preview appearance every time, and bot-side settings
+or Telegram previews being unavailable can affect rendering.
