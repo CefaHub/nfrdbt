@@ -26,6 +26,8 @@ class OwnerContactTests(unittest.TestCase):
         self.assertEqual(owner["owner_label"], "@GoodSeller_5")
         self.assertEqual(owner["owner_url"], "https://t.me/GoodSeller_5")
         self.assertEqual(owner["owner_type"], "user")
+        self.assertEqual(owner["owner_user_id"], 345)
+        self.assertEqual(owner["owner_profile_url"], "https://t.me/GoodSeller_5")
         self.assertEqual(owner["offer_min_stars"], 200)
 
     def test_no_public_username_creates_no_link(self):
@@ -36,7 +38,24 @@ class OwnerContactTests(unittest.TestCase):
         ], chats=[])
         owner = owner_contact(collectible, response)
         self.assertIsNone(owner["owner_url"])
+        self.assertEqual(owner["owner_user_id"], 345)
+        self.assertEqual(owner["owner_profile_url"], "tg://user?id=345")
         self.assertIn("без публичного", owner["owner_label"])
+
+    def test_peer_user_id_resolves_without_full_user_entity(self):
+        gift = SimpleNamespace(owner_id=PeerUser(678901), owner_address=None,
+                               owner_name=None, offer_min_stars=None)
+        owner = owner_contact(gift, SimpleNamespace(users=[], chats=[]))
+        self.assertEqual(owner["owner_user_id"], 678901)
+        self.assertEqual(owner["owner_profile_url"], "tg://user?id=678901")
+        self.assertIsNone(owner["owner_url"])
+
+    def test_no_owner_id_does_not_create_link(self):
+        gift = SimpleNamespace(owner_id=None, owner_address=None,
+                               owner_name="Somebody", offer_min_stars=None)
+        owner = owner_contact(gift, SimpleNamespace(users=[], chats=[]))
+        self.assertIsNone(owner["owner_profile_url"])
+        self.assertIsNone(owner["owner_user_id"])
 
     def test_only_active_usernames_accepted(self):
         user = SimpleNamespace(username=None, usernames=[
