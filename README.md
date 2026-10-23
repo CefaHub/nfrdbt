@@ -13,8 +13,8 @@ This repository contains a Telegram gift upgrade monitoring prototype designed f
    - `BOT_TOKEN` — the bot token (Bothost may provide it automatically)
    - `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` — **prefer your own** credentials; the values in `.env.example` are public *test* keys and may be rejected
    - `CHECK_INTERVAL=60`, `NFT_SCAN_INTERVAL=60`, `DATA_DIR=/app/data`
-   - `PAIR_CODE` — optional binding code; otherwise inspect hosting logs for it.
-6. Start the bot. Send `/start CODE` from your primary account, then `/status` and `/test`; use `/diagnose` to inspect NFT collection discovery and errors.
+   - A new single-use activation key is provided **privately** to the owner. Do not look for it in hosting logs. Its SHA-256 digest lives in `activation.py`.
+6. For a fresh bot, send `/start ONE_TIME_KEY` from your own Telegram account. If it was already paired, use `/activate ONE_TIME_KEY` to consume the key without changing the owner. Check `/key` for status. Then `/status` and `/test`; use `/diagnose` for collection discovery.
 
 ## Limitations
 
@@ -138,3 +138,42 @@ guaranteed to resolve for unrelated users who never interacted with the
 bot. Numeric IDs do not bypass privacy restrictions. A TON wallet address
 is not a Telegram chat. Use the official NFT purchase offer when possible.
 The bot never sends DMs to strangers automatically.
+
+## Single-use activation key (2026-10-24)
+
+The owner receives one **high-entropy** activation key separately, never
+through GitHub or Bothost logs. Only its SHA-256 digest is committed in
+`activation.py`. Do not share the actual key.
+
+- First setup with no registered user: `/start ONE_TIME_KEY`.
+- Already registered owner: `/activate ONE_TIME_KEY` (marks it consumed).
+- `/key` shows whether it was used; only the authorized owner can run it.
+- No replacement key is created during deploy, restart or update.
+- `/app/data/state.json` stores `owner_id` and `activation_consumed`.
+  Bothost's persistence docs confirm `/app/data` is kept across Git deploys.
+- A different user cannot steal an already registered owner slot even if they
+  possess the key. An already-consumed key never authenticates again.
+
+Do not delete or overwrite `/app/data/state.json`: the one-use consumption
+flag is recorded there. If hosting storage is deleted altogether, this local
+flag disappears; redeploys that preserve the data volume do not reset it.
+
+## Owner visibility and Telegram API limitations (2026-10-24)
+
+`payments.getUniqueStarGift` may expose an exact owner ID, or only
+`owner_name` (a **display name**, not necessarily a public username).
+The bot now checks public usernames included in `users` and also tries to
+resolve **only that disclosed ID** through Telethon's accessible entity cache.
+
+If the gift gives **only a display name**, a public username may exist for
+that person but **cannot be reliably linked** from the gifted NFT metadata.
+The program does not infer identity from similar display names or attempt
+to defeat privacy protections. On October 22, 2026, Telegram began removing
+owner profile links from gift pages for some users, so this limitation can
+affect previously visible owners. A missing link is not necessarily a bug.
+
+The `/owner COLLECTION-NUMBER` command always refreshes the gift's
+owner metadata. If a public owner username can be verified, it creates a
+direct chat link. Otherwise it shows the owner's display name and/or a
+conditional `tg://user?id=...` deep link when the numeric owner ID is
+present. A TON wallet is not a Telegram account.
