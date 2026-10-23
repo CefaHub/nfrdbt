@@ -395,3 +395,35 @@ No trades, bulk direct messages or wallet transfers are performed.
 
 Existing one-use activation key, owner pairing, /app/data state,
 unacknowledged alerts and original MTProto collector are retained.
+
+## IMPORTANT: recipient-only gift alerts (October 24, 2026)
+
+The bot now sends automatic NFT alerts **ONLY if Telegram's verified
+StarGiftAttributeOriginalDetails includes the original recipient peer**
+(the gift page's 'given to ...' / 'кому подарили' row). A bare owner name,
+seller username, gift sender without recipient, marketplace sale or mere
+upgrade-availability change is NOT sufficient.
+
+- MTProto polling checks OriginalDetails before creating an alert.
+- see.tg Live events are verified against the real Telegram collectible
+  by exact slug before notifying. If verification fails or the original
+  recipient is not present, the bot does not send that live event.
+- The notification prominently shows 'Кому подарили' with a clickable
+  original-recipient profile link when available, plus the gift preview.
+- Earlier queued notifications that lack a verified original recipient
+  are discarded once the updated delivery worker starts. This does NOT
+  delete the Telegram owner pairing, activation key, baselines or sales
+  history in /app/data/state.json.
+- Automatic listing, price and catalog alerts are suppressed. Live
+  sales and prices are still collected for the on-demand /value command.
+- Manually opted-in /watch alerts and a user-requested /testdelivery
+  diagnostic are separate, explicit workflows.
+
+**Important:** The person shown in 'Кому подарили' is the original
+recipient. They might not be the *current* owner after a transfer.
+Having a numeric Telegram user ID does not guarantee that Telegram
+will open the profile for private/unrelated accounts.
+
+Use /status and /live to see how many NFTs were skipped because their
+original recipient was missing. The filter is on by default and requires
+no new environment variables, secrets or one-use activation keys.
