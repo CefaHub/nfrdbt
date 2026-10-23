@@ -563,6 +563,69 @@ async def run() -> None:
                     f"{html.escape(type(exc).__name__ + ': ' + str(exc)[:120])}",
                     parse_mode="html",
                 )
+        elif cmd in ("/deal", "/watch", "/unwatch"):
+            slug = argument.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+            if not valid_gift_slug(slug):
+                await event.respond("Укажи NFT: /deal SpicedWine-108832\n"
+                                    "Или: /watch SpicedWine-108832")
+                return
+            if cmd == "/unwatch":
+                if slug in state.data.get("deal_watchlist", {}):
+                    del state.data["deal_watchlist"][slug]
+                    state.save()
+                    await event.respond(f"🔕 Убрал {slug} из отслеживания.")
+                else:
+                    await event.respond("Этого подарка нет в списке отслеживания.")
+                return
+            try:
+                snapshot = await fetch_deal_snapshot(user, slug)
+                if cmd == "/watch":
+                    watchlist = state.data.setdefault("deal_watchlist", {})
+                    if slug not in watchlist and len(watchlist) >= 20:
+                        await event.respond("Лимит — 20 одновременно отслеживаемых NFT.")
+                        return
+                    watchlist[slug] = snapshot
+                    state.save()
+                    prefix = "🔔 NFT добавлен в отслеживание.\n"
+                else:
+                    prefix = "🔎 Текущие возможности сделки:\n"
+                await event.respond(
+                    f"{prefix}"
+                    f"🎁 <a href=\"https://t.me/nft/{html.escape(slug, quote=True)}\">"
+                    f"{html.escape(slug)}</a>\n\n"
+                    f"{html.escape(deal_details(snapshot))}\n\n"
+                    + (
+                        f"Проверяю изменения каждые {DEAL_WATCH_INTERVAL} сек. "
+                        f"Чтобы отключить: /unwatch {slug}.\n"
+                        if cmd == "/watch" else
+                        f"Чтобы получить уведомление при изменении: /watch {slug}.\n"
+                    )
+                    + "При скрытом владельце невозможно надёжно определить его "
+                    "Telegram-аккаунт по одному отображаемому имени.",
+                    parse_mode="html", link_preview=False,
+                    buttons=deal_watch_buttons(slug, snapshot),
+                )
+            except FloodWaitError as exc:
+                await event.respond(f"⏳ Telegram ограничил запросы на {exc.seconds} секунд.")
+            except Exception as exc:
+                log.warning("Deal lookup failed for %s: %s", slug, exc)
+                await event.respond("❌ Не удалось проверить NFT через Telegram API.")
+        elif cmd == "/watches":
+            watched = state.data.get("deal_watchlist") or {}
+            if not watched:
+                await event.respond("🔕 Пока ничего не отслеживаю.\n"
+                                    "Добавь подарок: /watch SpicedWine-108832")
+            else:
+                lines = ["🔔 <b>Отслеживаемые NFT</b>"]
+                for slug in list(watched)[:20]:
+                    lines.append(
+                        f"• <a href=\"https://t.me/nft/{html.escape(slug, quote=True)}\">"
+                        f"{html.escape(slug)}</a>"
+                    )
+                lines.append(f"\nПроверка раз в {DEAL_WATCH_INTERVAL} сек; "
+                             "отмена — /unwatch НАЗВАНИЕ-НОМЕР.")
+                await event.respond("\n".join(lines), parse_mode="html",
+                                    link_preview=False)
         elif cmd == "/owner":
             slug = argument.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
             if not re.fullmatch(r"[A-Za-z0-9]+-[0-9]+", slug):
