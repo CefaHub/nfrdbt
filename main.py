@@ -20,6 +20,7 @@ from candidate_selection import get_candidates
 from owner_contact import owner_contact, resolve_owner_contact, offer_text
 from deal_watch import valid_gift_slug, deal_snapshot, deal_opportunities, deal_details
 from delivery import dispatch_next, fallback_text
+from scan_pacing import remaining_pause
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -45,7 +46,13 @@ INTERVAL = max(15, int(os.getenv("CHECK_INTERVAL", "20")))
 NOTIFY_PRICE_CHANGES = os.getenv("NOTIFY_PRICE_CHANGES", "false").lower() in {"true", "yes", "1"}
 TRACK_RARE_NFTS = os.getenv("TRACK_RARE_NFTS", "true").lower() in {"true", "yes", "1"}
 NOTIFY_ALL_NFTS = os.getenv("NOTIFY_ALL_NFTS", "true").lower() in {"true", "yes", "1"}
-NFT_SCAN_INTERVAL = max(5, int(os.getenv("NFT_SCAN_INTERVAL", "20")))
+# NFT_SCAN_INTERVAL now targets one complete sweep, not one batch.
+NFT_SWEEP_SECONDS = max(60, int(
+    os.getenv("NFT_SWEEP_SECONDS") or os.getenv("NFT_SCAN_INTERVAL", "60")
+))
+NFT_REQUEST_SPACING_SECONDS = max(
+    0.35, float(os.getenv("NFT_REQUEST_SPACING_SECONDS", "0.40"))
+)
 COLLECTIONS_PER_CYCLE = max(1, int(os.getenv("COLLECTIONS_PER_CYCLE", "5")))
 MAX_NEW_NFTS_PER_CYCLE = max(1, int(os.getenv("MAX_NEW_NFTS_PER_CYCLE", "25")))
 MAX_MODEL_RARITY_PCT = float(os.getenv("MAX_MODEL_RARITY_PCT", "1.0"))
@@ -263,6 +270,12 @@ NFT_HEALTH = {
     "last_catalog": None, "backlog": 0, "unresolved": 0, "last_scan_cycle": None,
     "total_new_nfts": 0, "total_rare_nfts": 0, "notified_nfts": 0,
     "last_nft": None,
+    "last_scan_finished": None,
+    "last_sweep_finished": None,
+    "sweeps_completed": 0,
+    "sweep_progress": 0,
+    "last_batch_duration": None,
+    "last_batch_successful": 0,
 }
 # Avoid retrying an invalid slug every minute. This cache is process-local.
 UNRESOLVED_UNTIL: dict[str, float] = {}
@@ -342,15 +355,20 @@ async def get_head_for_collection(
 
 async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
     round_robin = 0
-    # One loop is one batch of collections, not every available collectible.
+    # Full collection pass is paced at NFT_SWEEP_SECONDS (usually 60s).
     while True:
-        delay = NFT_SCAN_INTERVAL
+        tick_start = asyncio.get_running_loop().time()
+        delay = 0.0
+        candidate_count = 0
+        batch_count = 0
         try:
             candidates = nft_candidates()
+            candidate_count = len(candidates)
             NFT_HEALTH["candidates"] = len(candidates)
             NFT_HEALTH["backlog"] = 0
             NFT_HEALTH["last_scan_cycle"] = now_utc()
             if not candidates:
+                delay = NFT_SWEEP_SECONDS
                 NFT_HEALTH["last_error"] = "Нет коллекций из каталога. Проверяй логи payments.getStarGifts."
                 log.warning("NFT: не обнаружено ни одной коллекции-кандидата")
             else:
@@ -358,7 +376,13 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                     candidates[(round_robin + n) % len(candidates)]
                     for n in range(min(COLLECTIONS_PER_CYCLE, len(candidates)))
                 ]
-                round_robin = (round_robin + len(batch)) % len(candidates)
+                batch_count = len(batch)
+                previous_position = round_robin
+                round_robin = (round_robin + batch_count) % len(candidates)
+                NFT_HEALTH["sweep_progress"] = round_robin
+                if round_robin <= previous_position:
+                    NFT_HEALTH["sweeps_completed"] += 1
+                    NFT_HEALTH["last_sweep_finished"] = now_utc()
                 checked_this_round = 0
                 for slug, base_id in batch:
                     # Temporary cooldown for invalid / not yet upgraded gifts.
@@ -432,10 +456,16 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                         # Unresolvable candidates are retried every 10 minutes.
                         UNRESOLVED_UNTIL[slug] = asyncio.get_running_loop().time() + 600
                         log.warning("NFT scan failed for %s: %s", slug, exc)
+                    # Spread calls across the sweep to reduce rate limits.
+                    await asyncio.sleep(NFT_REQUEST_SPACING_SECONDS)
+                NFT_HEALTH["last_batch_successful"] = checked_this_round
                 log.info(
                     "NFT diagnostics: candidates=%d checked=%d total_checked=%d "
+                    "progress=%d/%d sweeps=%d target=%ds "
                     "baselines=%d backlog=%d errors=%d last_error=%s",
                     len(candidates), checked_this_round, NFT_HEALTH["checked"],
+                    NFT_HEALTH["sweep_progress"], len(candidates),
+                    NFT_HEALTH["sweeps_completed"], NFT_SWEEP_SECONDS,
                     len(state.data["collections"]), NFT_HEALTH["backlog"],
                     NFT_HEALTH["errors"], NFT_HEALTH["last_error"],
                 )
@@ -447,6 +477,12 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
             NFT_HEALTH["errors"] += 1
             NFT_HEALTH["last_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
             log.exception("NFT monitor error")
+        elapsed = asyncio.get_running_loop().time() - tick_start
+        NFT_HEALTH["last_scan_finished"] = now_utc()
+        NFT_HEALTH["last_batch_duration"] = round(elapsed, 2)
+        delay = remaining_pause(
+            elapsed, candidate_count, batch_count, NFT_SWEEP_SECONDS, delay,
+        )
         await asyncio.sleep(delay)
 
 
