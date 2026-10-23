@@ -40,8 +40,8 @@ INTERVAL = max(15, int(os.getenv("CHECK_INTERVAL", "20")))
 NOTIFY_PRICE_CHANGES = os.getenv("NOTIFY_PRICE_CHANGES", "false").lower() in {"true", "yes", "1"}
 TRACK_RARE_NFTS = os.getenv("TRACK_RARE_NFTS", "true").lower() in {"true", "yes", "1"}
 NFT_SCAN_INTERVAL = max(5, int(os.getenv("NFT_SCAN_INTERVAL", "20")))
-COLLECTIONS_PER_CYCLE = max(1, int(os.getenv("COLLECTIONS_PER_CYCLE", "3")))
-MAX_NEW_NFTS_PER_CYCLE = max(1, int(os.getenv("MAX_NEW_NFTS_PER_CYCLE", "10")))
+COLLECTIONS_PER_CYCLE = max(1, int(os.getenv("COLLECTIONS_PER_CYCLE", "5")))
+MAX_NEW_NFTS_PER_CYCLE = max(1, int(os.getenv("MAX_NEW_NFTS_PER_CYCLE", "25")))
 MAX_MODEL_RARITY_PCT = float(os.getenv("MAX_MODEL_RARITY_PCT", "1.0"))
 GIFT_COLLECTIONS = [x.strip() for x in os.getenv("GIFT_COLLECTIONS", "").split(",") if x.strip()]
 # Bothost preserves /app/data during redeploys.
@@ -107,60 +107,173 @@ async def deliver_pending(bot: TelegramClient) -> None:
             state.pop_delivered(item["event_id"])
 
 
+# These counters are intentionally visible via /status and /diagnose.
+NFT_HEALTH = {
+    "candidates": 0, "checked": 0, "discovered": 0, "errors": 0,
+    "last_success": None, "last_error": None, "last_found": None,
+    "last_catalog": None, "backlog": 0,
+}
+# Avoid retrying an invalid slug every minute. This cache is process-local.
+UNRESOLVED_UNTIL: dict[str, float] = {}
+
+
+def nft_candidates() -> list[tuple[str, int | None]]:
+    """Find candidate collections from the catalog and explicit overrides.
+
+    The catalog contains base gifts, not a stream of newly minted collectibles.
+    Some base gifts have no title, so the numeric gift ID is needed for rescue
+    through Telegram's official resale collection API.
+    """
+    candidates: list[tuple[str, int | None]] = []
+    seen: set[str] = set()
+    for manual in GIFT_COLLECTIONS:
+        slug = collection_slug(manual)
+        if slug and slug not in seen:
+            seen.add(slug)
+            candidates.append((slug, None))
+    for gid, gift in state.data["gifts"].items():
+        title = gift["title"]
+        slug = collection_slug(title)
+        if title.startswith("Подарок #"):
+            slug = ""
+        resolved = state.data.setdefault("resolved_slugs", {}).get(gid, "")
+        slug = resolved or slug
+        if slug and slug not in seen:
+            seen.add(slug)
+            candidates.append((slug, int(gid)))
+        elif not slug:
+            # The catalog may not provide a title; rescue with gift_id later.
+            candidates.append((f"unknown_{gid}", int(gid)))
+    return candidates
+
+
+def slug_prefix(value: str) -> str:
+    return value.rsplit("-", 1)[0] if value.rsplit("-", 1)[-1].isdigit() else ""
+
+
+async def get_head_for_collection(
+    user: TelegramClient, slug: str, base_id: int | None
+):
+    """Fetch a valid issued counter; recover bad/missing slugs via resale."""
+    if not slug.startswith("unknown_"):
+        try:
+            result = await user(functions.payments.GetUniqueStarGiftRequest(slug=f"{slug}-1"))
+            if int(getattr(result.gift, "availability_issued", -1)) < 0:
+                raise RuntimeError("Telegram omitted availability_issued")
+            return slug_prefix(result.gift.slug), result.gift
+        except FloodWaitError:
+            raise
+        except Exception as exc:
+            # Some #1 items may have disappeared; retry through resale.
+            log.debug("Cannot resolve %s-1 directly: %s", slug, exc)
+    if base_id is None:
+        raise ValueError(f"No valid unique collectible found for {slug}-1")
+    resale = await user(
+        functions.payments.GetResaleStarGiftsRequest(
+            gift_id=base_id, offset="", limit=1,
+        )
+    )
+    found = getattr(resale, "gifts", [])
+    if not found:
+        raise ValueError(
+            f"Cannot determine real collection slug for gift_id={base_id}; "
+            "not available via resale"
+        )
+    actual = slug_prefix(found[0].slug)
+    if not actual:
+        raise ValueError(f"Unexpected collectible slug for gift_id={base_id}")
+    result = await user(functions.payments.GetUniqueStarGiftRequest(slug=found[0].slug))
+    if str(getattr(result.gift, "gift_id", "")) != str(base_id):
+        raise ValueError("Resale collection ID mismatch")
+    state.data.setdefault("resolved_slugs", {})[str(base_id)] = actual
+    state.save()
+    log.info("Определена коллекция через Telegram: gift_id=%s -> %s", base_id, actual)
+    return actual, result.gift
+
+
 async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
     round_robin = 0
+    # One loop is one batch of collections, not every available collectible.
     while True:
         delay = NFT_SCAN_INTERVAL
         try:
-            if GIFT_COLLECTIONS:
-                collections = GIFT_COLLECTIONS
+            candidates = nft_candidates()
+            NFT_HEALTH["candidates"] = len(candidates)
+            NFT_HEALTH["backlog"] = 0
+            if not candidates:
+                NFT_HEALTH["last_error"] = "Нет коллекций из каталога. Проверяй логи payments.getStarGifts."
+                log.warning("NFT: не обнаружено ни одной коллекции-кандидата")
             else:
-                collections = list(dict.fromkeys(
-                    collection_slug(x["title"])
-                    for x in state.data["gifts"].values()
-                    if x.get("upgrade_stars") is not None
-                    and collection_slug(x["title"])
-                ))
-            if collections:
-                batch = [collections[(round_robin + n) % len(collections)]
-                         for n in range(min(COLLECTIONS_PER_CYCLE, len(collections)))]
-                round_robin = (round_robin + len(batch)) % len(collections)
-                for slug in batch:
+                batch = [
+                    candidates[(round_robin + n) % len(candidates)]
+                    for n in range(min(COLLECTIONS_PER_CYCLE, len(candidates)))
+                ]
+                round_robin = (round_robin + len(batch)) % len(candidates)
+                checked_this_round = 0
+                for slug, base_id in batch:
+                    # Temporary cooldown for invalid / not yet upgraded gifts.
+                    if UNRESOLVED_UNTIL.get(slug, 0) > asyncio.get_running_loop().time():
+                        continue
                     try:
-                        response = await user(functions.payments.GetUniqueStarGiftRequest(slug=f"{slug}-1"))
-                        unique = response.gift
-                        count = int(unique.availability_issued)
-                        previous = state.data["collections"].get(slug)
+                        resolved, gift = await get_head_for_collection(user, slug, base_id)
+                        NFT_HEALTH["checked"] += 1
+                        checked_this_round += 1
+                        NFT_HEALTH["last_success"] = now_utc()
+                        count = int(gift.availability_issued)
+                        previous = state.data["collections"].get(resolved)
                         if previous is None:
-                            # First observation per collection establishes baseline.
-                            state.set_collection_issued(slug, count)
-                            log.info("NFT baseline %s: %d issued", slug, count)
+                            # First valid scan establishes baseline: do not spam old NFTs.
+                            state.set_collection_issued(resolved, count)
+                            log.info("NFT baseline %s: %s already issued", resolved, count)
                             continue
                         if count < previous:
-                            # Telegram can reset counts or change a collection; avoid historical flood.
-                            state.set_collection_issued(slug, count)
+                            state.set_collection_issued(resolved, count)
+                            log.warning("NFT counter decreased for %s: %d -> %d", resolved, previous, count)
                             continue
+                        if count > previous:
+                            log.info("NFT NEW: %s #%d–#%d (checking up to %d)", resolved, previous+1,
+                                     count, MAX_NEW_NFTS_PER_CYCLE)
                         upper = min(count, previous + MAX_NEW_NFTS_PER_CYCLE)
+                        NFT_HEALTH["backlog"] += max(0, count - upper)
                         for number in range(previous + 1, upper + 1):
-                            # A failed request must not advance the cursor.
-                            details = await user(functions.payments.GetUniqueStarGiftRequest(
-                                slug=f"{slug}-{number}"))
-                            collectible = details.gift
-                            attrs = extract_attributes(collectible)
-                            if is_rare_model(attrs, MAX_MODEL_RARITY_PCT):
-                                event = make_event(collectible, attrs, now_utc())
-                                state.record_rare_nft(event)
-                                log.info("Rare NFT: %s", collectible.slug)
-                            state.set_collection_issued(slug, number)
+                            # A failed request must not move the cursor forward.
+                            collectible = (
+                                await user(functions.payments.GetUniqueStarGiftRequest(
+                                    slug=f"{resolved}-{number}"))
+                            ).gift
+                            # Crafting also creates unique gifts, but is not a normal upgrade.
+                            if not getattr(collectible, "crafted", False):
+                                attrs = extract_attributes(collectible)
+                                if is_rare_model(attrs, MAX_MODEL_RARITY_PCT):
+                                    event = make_event(collectible, attrs, now_utc())
+                                    state.record_rare_nft(event)
+                                    NFT_HEALTH["discovered"] += 1
+                                    NFT_HEALTH["last_found"] = now_utc()
+                                    log.info("Rare upgrade discovered: %s", collectible.slug)
+                            state.set_collection_issued(resolved, number)
                             await deliver_pending(bot)
                     except FloodWaitError:
                         raise
                     except Exception as exc:
-                        log.warning("NFT scan %s: %s", slug, exc)
+                        NFT_HEALTH["errors"] += 1
+                        NFT_HEALTH["last_error"] = f"{slug}: {type(exc).__name__}: {str(exc)[:160]}"
+                        # Unresolvable candidates are retried every 10 minutes.
+                        UNRESOLVED_UNTIL[slug] = asyncio.get_running_loop().time() + 600
+                        log.warning("NFT scan failed for %s: %s", slug, exc)
+                log.info(
+                    "NFT diagnostics: candidates=%d checked=%d total_checked=%d "
+                    "baselines=%d backlog=%d errors=%d last_error=%s",
+                    len(candidates), checked_this_round, NFT_HEALTH["checked"],
+                    len(state.data["collections"]), NFT_HEALTH["backlog"],
+                    NFT_HEALTH["errors"], NFT_HEALTH["last_error"],
+                )
         except FloodWaitError as exc:
             delay = max(delay, exc.seconds + 3)
-            log.warning("NFT API FloodWait, sleep %d sec", delay)
-        except Exception:
+            NFT_HEALTH["last_error"] = f"FloodWait: {exc.seconds} seconds"
+            log.warning("NFT rate limit, sleep %d sec", delay)
+        except Exception as exc:
+            NFT_HEALTH["errors"] += 1
+            NFT_HEALTH["last_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
             log.exception("NFT monitor error")
         await asyncio.sleep(delay)
 
@@ -173,6 +286,7 @@ async def monitor(user: TelegramClient, bot: TelegramClient) -> None:
             if not hasattr(result, "gifts"):
                 raise RuntimeError("Telegram не прислал список подарков")
             gifts = [Gift.from_telegram(g) for g in result.gifts]
+            NFT_HEALTH["last_catalog"] = now_utc()
             new_events = state.update_gifts(gifts, NOTIFY_PRICE_CHANGES)
             if new_events:
                 log.info("Обнаружено новых событий: %d", len(new_events))
@@ -222,6 +336,7 @@ async def run() -> None:
             await event.respond(
                 "📡 <b>Gift Upgrade Radar</b>\n\n"
                 "/status — состояние\n"
+                "/diagnose — диагностика NFT\n"
                 "/last — последние события\n"
                 "/test — пробное уведомление\n"
                 "/pause — отключить уведомления\n"
@@ -241,8 +356,25 @@ async def run() -> None:
                 f"коллекций с baseline: {len(state.data['collections'])}\n"
                 f"🔥 Редкая модель: ≤ {MAX_MODEL_RARITY_PCT:g}% или tier epic/legendary\n"
                 f"📬 В очереди: {len(state.data['pending'])}\n"
-                f"🕒 Последняя проверка: {state.data['last_check'] or 'ещё не было'} (UTC)",
+                f"🕒 Последняя проверка каталога: {state.data['last_check'] or 'ещё не было'} (UTC)\n"
+                f"📡 NFT кандидатов: {NFT_HEALTH['candidates']}\n"
+                f"✅ Проверок NFT: {NFT_HEALTH['checked']}\n"
+                f"📬 Найдено редких NFT: {NFT_HEALTH['discovered']}\n"
+                f"⚠️ Ошибок: {NFT_HEALTH['errors']}\n"
+                f"🕒 Последний успешный NFT-запрос: {NFT_HEALTH['last_success'] or 'ни одного'}\n"
+                f"❗ Ошибка NFT: {html.escape(NFT_HEALTH['last_error'] or 'нет')}",
                 parse_mode="html",
+            )
+        elif cmd == "/diagnose":
+            candidates = nft_candidates()
+            head = ", ".join(x[0] for x in candidates[:6]) or "нет"
+            await event.respond(
+                "🔎 <b>Диагностика NFT</b>\n"
+                f"Кандидатов: {len(candidates)}; проверено запросов: {NFT_HEALTH['checked']}\n"
+                f"Известных коллекций: {len(state.data['collections'])}\n"
+                f"Обнаружено: {NFT_HEALTH['discovered']}; backlog: {NFT_HEALTH['backlog']}\n"
+                f"Последняя ошибка: {html.escape(NFT_HEALTH['last_error'] or 'нет')}\n"
+                f"Примеры: {html.escape(head)}", parse_mode="html"
             )
         elif cmd == "/last":
             recent = state.data["history"][-10:]
