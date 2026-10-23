@@ -177,3 +177,27 @@ owner metadata. If a public owner username can be verified, it creates a
 direct chat link. Otherwise it shows the owner's display name and/or a
 conditional `tg://user?id=...` deep link when the numeric owner ID is
 present. A TON wallet is not a Telegram account.
+
+
+## Deal/watch commands for hidden gift owners
+
+Since October 22, 2026, Telegram can return only owner_name for a collectible gift.
+A display name alone never uniquely identifies a Telegram profile.
+
+- `/deal SpicedWine-108832`: check visible owner link, offer eligibility,
+  and current official resale prices; show a button opening the NFT.
+- `/watch SpicedWine-108832`: save a persistent 3-minute monitor for this gift.
+  Notify the registered user if the official Telegram API later exposes a
+  public username, numeric owner ID, official purchase offer or resale price.
+- `/watches`: see the monitored gifts (max 20).
+- `/unwatch SpicedWine-108832`: stop monitoring the selected gift.
+
+State lives in /app/data/state.json and survives Bothost code updates
+as long as its persistent data volume isn't deleted. Configure
+`DEAL_WATCH_INTERVAL=180` in Bothost env variables to adjust cadence
+(minimum 60 seconds).
+
+Polling cannot identify a hidden Telegram account from the owner's
+display name. It doesn't send private messages or make a purchase.
+An official offer without owner_id is not available through MTProto.
+All monetary decisions remain with the user in the Telegram client.
