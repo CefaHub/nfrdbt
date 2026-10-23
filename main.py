@@ -5,17 +5,19 @@ import asyncio
 import html
 import logging
 import os
+import re
 import secrets
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telethon import TelegramClient, events, functions
+from telethon import Button, TelegramClient, events, functions
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 
 from radar import Gift, RadarState, now_utc
 from mint_radar import collection_slug, extract_attributes, is_rare_model, make_event
 from candidate_selection import get_candidates
+from owner_contact import owner_contact, offer_text
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -57,17 +59,46 @@ DELIVERY_LOCK = asyncio.Lock()
 def message_for_gift(item: dict) -> str:
     title = html.escape(item["title"])
     if item["kind"] in {"rare_nft", "new_nft"}:
-        link = f"https://t.me/nft/{item['slug']}"  # Actual slug returned by Telegram.
+        link = f"https://t.me/nft/{item['slug']}"
+        headline = (
+            "💎 <b>ЗАСЕЧЁН РЕДКИЙ NFT!</b>"
+            if item["kind"] == "rare_nft"
+            else "🎁 <b>НОВЫЙ NFT ПОСЛЕ УЛУЧШЕНИЯ</b>"
+        )
+        owner = html.escape(item.get("owner_label") or "Не раскрыт")
+        owner_url = item.get("owner_url")
+        if owner_url:
+            owner_display = (
+                f'<a href="{html.escape(owner_url, quote=True)}">{owner}</a>'
+            )
+        else:
+            owner_display = owner
+        offer_min = item.get("offer_min_stars")
+        offer_line = (
+            f"💰 Официальный оффер: от {offer_min} ⭐"
+            if isinstance(offer_min, int) else
+            "💰 Оффер: проверь доступность в Telegram"
+        )
+        contact_note = (
+            "✉️ Нажми «Написать владельцу» ниже."
+            if owner_url and item.get("owner_type") == "user"
+            else "🔐 Прямой контакт пользователя не открыт; проверь NFT и кнопку оффера."
+        )
         return (
-            ("💎 <b>ЗАСЕЧЁН РЕДКИЙ NFT!</b>\n\n" if item["kind"] == "rare_nft"
-             else "🎁 <b>НОВЫЙ NFT ПОСЛЕ УЛУЧШЕНИЯ</b>\n\n")
-            + f"🎁 <b>{title} #{item['number']}</b>\n"
-            f"🔥 Модель: <b>{html.escape(item['model'])}</b> ({item['model_rarity']})\n"
-            f"🎨 Фон: {html.escape(item['backdrop'])} ({item['backdrop_rarity']})\n"
-            f"✳️ Символ: {html.escape(item['pattern'])} ({item['pattern_rarity']})\n"
-            f"🔗 <a href=\"{html.escape(link, quote=True)}\">Открыть NFT</a>\n"
+            f"{headline}\n\n"
+            f"🎁 <b>{title} #{item['number']}</b>\n"
+            f"🔥 Модель: <b>{html.escape(item['model'])}</b> "
+            f"({html.escape(item['model_rarity'])})\n"
+            f"🎨 Фон: {html.escape(item['backdrop'])} "
+            f"({html.escape(item['backdrop_rarity'])})\n"
+            f"✳️ Символ: {html.escape(item['pattern'])} "
+            f"({html.escape(item['pattern_rarity'])})\n"
+            f"👤 Владелец: {owner_display}\n"
+            f"{offer_line}\n"
+            f"{contact_note}\n"
+            f"📝 Черновик: <code>/offer {html.escape(item['slug'])}</code>\n"
             f"🕒 Обнаружен: {html.escape(item['created_at'])} UTC\n\n"
-            "Редкость — частота выпадения атрибута, не рыночная оценка."
+            "Проверь актуального владельца перед покупкой: подарок могли передать."
         )
     stars = item["upgrade_stars"]
     kind = item["kind"]
@@ -89,8 +120,24 @@ def message_for_gift(item: dict) -> str:
     return msg
 
 
-async def send_alert(bot: TelegramClient, chat_id: int, text: str) -> None:
-    await bot.send_message(chat_id, text, parse_mode="html", link_preview=False)
+def nft_buttons(item: dict):
+    if item.get("kind") not in {"rare_nft", "new_nft"}:
+        return None
+    buttons = [
+        [Button.url("🎁 Открыть NFT / оффер", f"https://t.me/nft/{item['slug']}")]
+    ]
+    # Telegram only gives us an actionable link when owner's public
+    # username is present in its response. Never construct hidden profiles.
+    if item.get("owner_type") == "user" and item.get("owner_url"):
+        buttons.append([Button.url("✉️ Написать владельцу", item["owner_url"])])
+    return buttons
+
+
+async def send_alert(bot: TelegramClient, chat_id: int, text: str, item: dict | None = None) -> None:
+    await bot.send_message(
+        chat_id, text, parse_mode="html", link_preview=False,
+        buttons=nft_buttons(item or {}),
+    )
 
 
 async def deliver_pending(bot: TelegramClient) -> None:
@@ -100,7 +147,7 @@ async def deliver_pending(bot: TelegramClient) -> None:
     async with DELIVERY_LOCK:
         for item in list(state.data["pending"]):
             try:
-                await send_alert(bot, owner_id, message_for_gift(item))
+                await send_alert(bot, owner_id, message_for_gift(item), item)
             except FloodWaitError as exc:
                 log.warning("Bot flood wait: %s sec", exc.seconds)
                 return
@@ -242,15 +289,17 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                         NFT_HEALTH["backlog"] += max(0, count - upper)
                         for number in range(previous + 1, upper + 1):
                             # A failed request must not move the cursor forward.
-                            collectible = (
-                                await user(functions.payments.GetUniqueStarGiftRequest(
-                                    slug=f"{resolved}-{number}"))
-                            ).gift
+                            details = await user(
+                                functions.payments.GetUniqueStarGiftRequest(
+                                    slug=f"{resolved}-{number}")
+                            )
+                            collectible = details.gift
                             # Crafting has its own minting process; the radar tracks upgrades.
                             if not getattr(collectible, "crafted", False):
                                 attrs = extract_attributes(collectible)
                                 rare = is_rare_model(attrs, MAX_MODEL_RARITY_PCT)
                                 event = make_event(collectible, attrs, now_utc(), rare=rare)
+                                event.update(owner_contact(collectible, details))
                                 NFT_HEALTH["total_new_nfts"] += 1
                                 NFT_HEALTH["last_nft"] = str(collectible.slug)
                                 if rare:
@@ -353,6 +402,7 @@ async def run() -> None:
                 "/status — состояние\n"
                 "/diagnose — диагностика NFT\n"
                 "/all on — оповещать обо всех улучшенных NFT\n"
+                "/offer PlushPepe-123 1500 — черновик сделки\n"
                 "/all off — только редкие модели\n"
                 "/check PlushPepe — проверить коллекцию напрямую\n"
                 "/last — последние события\n"
@@ -424,6 +474,61 @@ async def run() -> None:
                 await event.respond(
                     f"❌ Не удалось проверить коллекцию: "
                     f"{html.escape(type(exc).__name__ + ': ' + str(exc)[:120])}",
+                    parse_mode="html",
+                )
+        elif cmd == "/offer":
+            args = argument.split()
+            # Allow either a direct slug or a copied Telegram NFT link.
+            slug = args[0].split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] if args else ""
+            if not re.fullmatch(r"[A-Za-z0-9]+-[0-9]+", slug):
+                await event.respond("Пример: /offer PlushPepe-123 1500\nИли: /offer PlushPepe-123")
+                return
+            amount = None
+            if len(args) > 1:
+                if not args[1].isdigit() or not 1 <= int(args[1]) <= 1_000_000_000:
+                    await event.respond("Укажи сумму звёзд положительным целым числом.")
+                    return
+                amount = int(args[1])
+            try:
+                details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
+                unique = details.gift
+                contact = owner_contact(unique, details)
+                minimum = contact.get("offer_min_stars")
+                if amount is not None and minimum is not None and amount < minimum:
+                    await event.respond(
+                        f"⚠️ Минимальный официальный оффер: {minimum} ⭐. "
+                        "Попробуй другую сумму."
+                    )
+                    return
+                draft = html.escape(offer_text(unique, amount))
+                url = contact.get("owner_url")
+                peer_kind = contact.get("owner_type")
+                buttons = [[Button.url("🎁 Открыть NFT / оффер", f"https://t.me/nft/{slug}")]]
+                if url and peer_kind == "user":
+                    buttons.append([Button.url("✉️ Написать владельцу", url)])
+                if peer_kind == "user" and url:
+                    note = "Открой публичный профиль и отправь предложение вручную."
+                else:
+                    note = (
+                        "Контакт для личного сообщения недоступен. "
+                        "Проверь наличие кнопки официального оффера на странице NFT."
+                    )
+                await event.respond(
+                    "📝 <b>Сообщение для продавца</b>\n"
+                    f"<code>{draft}</code>\n\n"
+                    f"👤 Владелец сейчас: {html.escape(contact['owner_label'])}\n"
+                    f"💰 Мин. оффер: {minimum if minimum is not None else 'не указан'} ⭐\n"
+                    f"{note}\n\n"
+                    "Сообщение не отправлено: скопируй его и реши сам, писать ли человеку.",
+                    parse_mode="html", link_preview=False, buttons=buttons,
+                )
+            except FloodWaitError as exc:
+                await event.respond(f"⏳ Telegram ограничил запросы: {exc.seconds} сек.")
+            except Exception as exc:
+                log.warning("Cannot prepare offer for %s: %s", slug, exc)
+                await event.respond(
+                    "❌ Не удалось получить актуальные сведения о владельце "
+                    f"этого NFT: {html.escape(type(exc).__name__)}",
                     parse_mode="html",
                 )
         elif cmd == "/all":
