@@ -415,6 +415,7 @@ async def run() -> None:
                 "/status — состояние\n"
                 "/diagnose — диагностика NFT\n"
                 "/all on — оповещать обо всех улучшенных NFT\n"
+                "/owner PlushPepe-123 — ссылка на профиль владельца\n"
                 "/offer PlushPepe-123 1500 — черновик сделки\n"
                 "/all off — только редкие модели\n"
                 "/check PlushPepe — проверить коллекцию напрямую\n"
@@ -489,6 +490,52 @@ async def run() -> None:
                     f"{html.escape(type(exc).__name__ + ': ' + str(exc)[:120])}",
                     parse_mode="html",
                 )
+        elif cmd == "/owner":
+            slug = argument.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+            if not re.fullmatch(r"[A-Za-z0-9]+-[0-9]+", slug):
+                await event.respond("Пример: /owner PlushPepe-123")
+                return
+            try:
+                details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
+                contact = owner_contact(details.gift, details)
+                url = contact.get("owner_profile_url")
+                real_username = contact.get("owner_url")
+                user_id = contact.get("owner_user_id")
+                if contact.get("owner_type") == "user" and url:
+                    buttons = [[Button.url(
+                        "✉️ Открыть чат владельца" if real_username else
+                        "👤 Открыть профиль по Telegram ID", url
+                    )]]
+                    note = (
+                        "✅ Публичная ссылка на чат."
+                        if real_username else
+                        "⚠️ Ссылка по ID может не открыться, если Telegram "
+                        "не разрешает доступ к профилю по настройкам приватности."
+                    )
+                    await event.respond(
+                        f"🎁 <a href=\"https://t.me/nft/{html.escape(slug, quote=True)}\">"
+                        f"{html.escape(slug)}</a>\n"
+                        f"👤 Владелец: {html.escape(contact['owner_label'])}\n"
+                        f"🆔 Telegram ID: <code>{user_id}</code>\n"
+                        f"🔗 <a href=\"{html.escape(url, quote=True)}\">Открыть профиль</a>\n"
+                        f"{note}\n\n"
+                        "Узнать, можно ли написать этому человеку, можно только при открытии профиля.",
+                        parse_mode="html", link_preview=False, buttons=buttons,
+                    )
+                else:
+                    await event.respond(
+                        f"🎁 NFT: {html.escape(slug)}\n"
+                        f"👤 Владелец: {html.escape(contact['owner_label'])}\n"
+                        "🔐 Telegram не раскрыл личный аккаунт владельца. "
+                        "Проверь страницу NFT и официальную кнопку оффера.",
+                        parse_mode="html",
+                        buttons=[[Button.url("🎁 Открыть NFT", f"https://t.me/nft/{slug}")]],
+                    )
+            except FloodWaitError as exc:
+                await event.respond(f"⏳ Telegram ограничил запросы: {exc.seconds} сек.")
+            except Exception as exc:
+                log.warning("Failed to find owner for %s: %s", slug, exc)
+                await event.respond("❌ Не удалось получить актуального владельца NFT.")
         elif cmd == "/offer":
             args = argument.split()
             # Allow either a direct slug or a copied Telegram NFT link.
