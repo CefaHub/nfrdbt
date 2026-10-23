@@ -105,7 +105,11 @@ def normalize_live_event(payload: Any) -> dict | None:
         "market": str(payload.get("market") or "Telegram"),
         "seller": verified_public_seller(payload),
     }
-    price = market_price(payload.get("price"), payload.get("price_ton"))
+    action = payload.get("price") or payload.get("sale") or payload.get("saleAction")
+    normalized_amount = payload.get("price_ton")
+    if normalized_amount is None and isinstance(action, dict):
+        normalized_amount = action.get("amountTon") or action.get("amount_ton")
+    price = market_price(action, normalized_amount)
     if price:
         normalized["price"] = price
     return normalized
