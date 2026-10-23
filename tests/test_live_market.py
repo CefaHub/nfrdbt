@@ -8,7 +8,7 @@ from live_market import (
     normalize_live_event, gift_slug, market_price, verified_public_seller,
     record_sale, estimate_listing, deal_notification, live_nft_notification,
 )
-from see_live import consume_socket, subscribe_packet
+from see_live import HEALTH, consume_socket, subscribe_packet
 
 
 def listing(slug="PlushPepe", num=42, amount=3_500_000_000):
@@ -141,6 +141,50 @@ class LiveWebSocketTests(unittest.IsolatedAsyncioTestCase):
         await consume_socket(sock, collect, token="SECRET_TOKEN")
         self.assertEqual(sock.sent[0], {"type": "auth", "token": "SECRET_TOKEN"})
         self.assertEqual(sock.sent[1]["type"], "subscribe")
+
+    async def test_kind_disabled_is_documented_server_limitation_not_transport_failure(self):
+        sale = listing()
+        sale["event"] = "sale"
+        received = []
+        sock = FakeSocket([
+            {"type": "hello", "events": ["listing", "sale"],
+             "disabled": ["new"]},
+            {"type": "error", "code": "kind_disabled", "events": ["new"]},
+            sale,
+        ])
+        await consume_socket(sock, lambda event: captured(received, event))
+        self.assertEqual(HEALTH["status"], "подключено")
+        self.assertEqual(HEALTH["disabled_kinds"], ["new"])
+        self.assertIsNone(HEALTH["last_error"])
+        self.assertIn("new", HEALTH["last_notice"])
+        self.assertEqual(HEALTH["event_counts"]["sale"] >= 1, True)
+        self.assertEqual(received[0]["type"], "sale")
+
+    async def test_kind_enabled_clears_disabled_and_resubscribes(self):
+        sock = FakeSocket([
+            {"type": "kind_disabled", "events": ["new"], "unsubscribed": ["new"]},
+            {"type": "kind_enabled", "events": ["new"]},
+        ])
+        await consume_socket(sock, lambda event: captured([], event))
+        self.assertNotIn("new", HEALTH["disabled_kinds"])
+        self.assertEqual(len(sock.sent), 2)
+        self.assertIn("new", sock.sent[1]["events"])
+
+    async def test_subscription_ack_discloses_rejected_event_kinds(self):
+        sock = FakeSocket([
+            {"type": "subscribed", "events": ["sale", "listing"],
+             "disabled": ["new", "price"]},
+        ])
+        await consume_socket(sock, lambda event: captured([], event))
+        self.assertEqual(HEALTH["disabled_kinds"], ["new", "price"])
+        self.assertIsNone(HEALTH["last_error"])
+
+    async def test_unrelated_server_error_remains_an_error(self):
+        sock = FakeSocket([
+            {"type": "error", "code": "too_many_connections"},
+        ])
+        await consume_socket(sock, lambda event: captured([], event))
+        self.assertEqual(HEALTH["last_error"], "see.tg WebSocket: too_many_connections")
 
     async def test_bad_json_is_safely_ignored(self):
         collected = []
