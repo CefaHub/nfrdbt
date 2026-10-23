@@ -389,7 +389,16 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                                 attrs = extract_attributes(collectible)
                                 rare = is_rare_model(attrs, MAX_MODEL_RARITY_PCT)
                                 event = make_event(collectible, attrs, now_utc(), rare=rare)
-                                event.update(await resolve_owner_contact(collectible, details, user))
+                                # Owner lookup must never stall mint scanning.
+                                try:
+                                    contact = await asyncio.wait_for(
+                                        resolve_owner_contact(collectible, details, user),
+                                        timeout=3.0,
+                                    )
+                                except Exception as exc:
+                                    log.debug("Owner lookup delayed for %s: %s", collectible.slug, exc)
+                                    contact = owner_contact(collectible, details)
+                                event.update(contact)
                                 NFT_HEALTH["total_new_nfts"] += 1
                                 NFT_HEALTH["last_nft"] = str(collectible.slug)
                                 if rare:
@@ -515,7 +524,10 @@ async def run() -> None:
     # Hosted mode is noninteractive: authenticate using a pre-generated String Session.
     user_session = StringSession(SESSION_STRING) if SESSION_STRING else str(DATA_DIR / "user")
     user = TelegramClient(user_session, API_ID, API_HASH)
-    bot = TelegramClient(str(DATA_DIR / "bot"), API_ID, API_HASH)
+    bot = TelegramClient(
+        str(DATA_DIR / "bot"), API_ID, API_HASH,
+        flood_sleep_threshold=0,  # Worker handles rate limits independently.
+    )
 
     # A single-use secret's SHA-256 is in activation.py, NEVER the secret.
     # Used/owner state lives at /app/data/state.json and survives Bothost deploys.
