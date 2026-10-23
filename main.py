@@ -148,6 +148,18 @@ def market_deal_message(item: dict) -> str:
     )
 
 
+def recipient_highlight(item: dict) -> str:
+    recipient = recipient_from_history(item.get("original_participants"))
+    if not recipient:
+        return ""
+    name = html.escape(str(recipient.get("label") or "Telegram-получатель"))
+    url = html.escape(recipient["url"], quote=True)
+    return (
+        f'📥 <b>Кому подарили:</b> <a href="{url}">{name}</a>\n'
+        "ℹ️ Первый получатель, не обязательно текущий владелец.\n"
+    )
+
+
 def message_for_gift(item: dict) -> str:
     if item.get("kind") == "market_deal":
         return market_deal_message(item)
@@ -194,6 +206,7 @@ def message_for_gift(item: dict) -> str:
             f"{headline}\n\n"
             f"{link}\n\n"  # First URL in message: Telegram renders the gift card preview.
             f"🎁 <b>{title} #{item['number']}</b>\n"
+            f"{recipient_highlight(item)}"
             f"🔥 Модель: <b>{html.escape(item['model'])}</b> "
             f"({html.escape(item['model_rarity'])})\n"
             f"🎨 Фон: {html.escape(item['backdrop'])} "
@@ -803,7 +816,7 @@ async def run() -> None:
                 "/value PlushPepe-123 — цена и продажи из live-потока\n"
                 "/delivery — очередь и ошибки доставки\n"
                 "/diagnose — диагностика NFT\n"
-                "/all on — оповещать обо всех улучшенных NFT\n"
+                "/all on — все NFT с видимым первым получателем\n"
                 "/owner PlushPepe-123 — ссылка на профиль владельца\n"                "/origin PlushPepe-123 — первый отправитель и получатель\n"
                 "/deal PlushPepe-123 — способы связаться или купить\n"
                 "/watch PlushPepe-123 — следить за продажей\n"
@@ -882,6 +895,8 @@ async def run() -> None:
                 f"{html.escape(new_status)}\n"
                 f"Сообщение сервера: {html.escape(LIVE_HEALTH.get('last_notice') or 'нет')}\n"
                 f"Новых NFT оповещено: {LIVE_COUNTERS['new_notified']}\n"
+                f"Без первого получателя: {LIVE_COUNTERS['filtered_no_recipient']}\n"
+                "Фильтр: только NFT с записью кому подарили (история Telegram)\n"
                 f"Пропущено из-за ограничения: {LIVE_COUNTERS['new_skipped_limit']}\n"
                 f"Наблюдаемых продаж: {LIVE_COUNTERS['sales_recorded']}\n"
                 f"Возможных сделок отправлено: {LIVE_COUNTERS['deals_notified']}\n"
