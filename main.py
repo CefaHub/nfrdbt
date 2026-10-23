@@ -111,6 +111,7 @@ def message_for_gift(item: dict) -> str:
         )
         return (
             f"{headline}\n\n"
+            f"{link}\n\n"  # First URL in message: Telegram renders the gift card preview.
             f"🎁 <b>{title} #{item['number']}</b>\n"
             f"🔥 Модель: <b>{html.escape(item['model'])}</b> "
             f"({html.escape(item['model_rarity'])})\n"
@@ -166,9 +167,13 @@ def nft_buttons(item: dict):
 
 
 async def send_alert(bot: TelegramClient, chat_id: int, text: str, item: dict | None = None) -> None:
+    item = item or {}
+    # Telegram's webpage preview requires both an actual URL in message
+    # text and link_preview=True. A URL button alone produces no preview.
+    show_gift_preview = item.get("kind") in {"new_nft", "rare_nft"}
     await bot.send_message(
-        chat_id, text, parse_mode="html", link_preview=False,
-        buttons=nft_buttons(item or {}),
+        chat_id, text, parse_mode="html", link_preview=show_gift_preview,
+        buttons=nft_buttons(item),
     )
 
 
@@ -201,7 +206,7 @@ async def delivery_worker(bot: TelegramClient) -> None:
                 await bot.send_message(
                     state.owner_id,
                     fallback_text(item),
-                    link_preview=False,
+                    link_preview=item.get("kind") in {"new_nft", "rare_nft"},
                 )
 
             result, item = await asyncio.wait_for(
@@ -585,6 +590,7 @@ async def run() -> None:
                 "/check PlushPepe — проверить коллекцию напрямую\n"
                 "/last — последние события\n"
                 "/test — пробное уведомление\n"                "/testdelivery — проверить реальную очередь отправки\n"
+                "/preview PartySparkler-189558 — проверить карточку NFT\n"
                 "/pause — отключить уведомления\n"
                 "/resume — включить уведомления\n"
                 "/key — статус одноразового ключа\n"
@@ -876,6 +882,33 @@ async def run() -> None:
                     else:
                         lines.append(f"• {html.escape(x['title'])}: {x['upgrade_stars']}⭐ — {x['created_at']}")
                 await event.respond("\n".join(lines), parse_mode="html")
+        elif cmd == "/preview":
+            # A stand-alone live preview smoke test, without touching
+            # NFT baselines or persistent outgoing notifications.
+            slug = argument.strip().split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+            if not valid_gift_slug(slug):
+                await event.respond("Пример: /preview PartySparkler-189558")
+                return
+            gift_url = f"https://t.me/nft/{slug}"
+            try:
+                await bot.send_message(
+                    event.sender_id,
+                    f"🎁 <b>Проверка превью NFT</b>\n\n"
+                    f"{gift_url}\n\n"
+                    "Карточку с изображением формирует сам Telegram.",
+                    parse_mode="html",
+                    link_preview=True,
+                    buttons=[[Button.url("🎁 Открыть подарок", gift_url)]],
+                )
+            except FloodWaitError as exc:
+                await event.respond(f"⏳ Telegram ограничил отправку на {exc.seconds} сек.")
+            except Exception as exc:
+                log.warning("NFT preview test failed for %s: %s", slug, exc)
+                await event.respond(
+                    "❌ Не удалось отправить превью: "
+                    + html.escape(type(exc).__name__ + ": " + str(exc)[:120]),
+                    parse_mode="html",
+                )
         elif cmd == "/testdelivery":
             synthetic = {
                 "kind": "delivery_test",
