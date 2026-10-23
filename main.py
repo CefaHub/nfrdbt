@@ -830,12 +830,32 @@ async def run() -> None:
                 parse_mode="html",
             )
         elif cmd == "/live":
+            disabled = LIVE_HEALTH.get("disabled_kinds") or []
+            counts = LIVE_HEALTH.get("event_counts") or {}
+            summary = ", ".join(
+                f"{label}: {counts.get(kind, 0)}"
+                for kind, label in (
+                    ("new", "новые NFT"), ("listing", "листинги"),
+                    ("price", "изменения цены"), ("sale", "продажи"),
+                    ("transfer", "передачи"),
+                )
+            )
+            if "new" in disabled:
+                new_status = "⚠️ see.tg временно отключил событие new; MTProto продолжает сканирование"
+            elif counts.get("new", 0) == 0:
+                new_status = "ℹ️ see.tg пока не прислал ни одного события new"
+            else:
+                new_status = f"✅ Событий new: {counts['new']}"
             await event.respond(
                 "⚡ <b>NFT Radar 2.0 — see.tg Live</b>\n"
                 f"Подключение: {html.escape(LIVE_HEALTH['status'])}\n"
                 f"Режим: {'авторизованный' if LIVE_API_TOKEN else 'гость (имена могут быть скрыты)'}\n"
                 "REST-запросы: отключены; платных запросов: 0\n"
                 f"Событий потока: {LIVE_HEALTH['events_seen']}\n"
+                f"Типы событий: {html.escape(summary)}\n"
+                f"Временно отключены see.tg: {html.escape(', '.join(disabled) or 'нет')}\n"
+                f"{html.escape(new_status)}\n"
+                f"Сообщение сервера: {html.escape(LIVE_HEALTH.get('last_notice') or 'нет')}\n"
                 f"Новых NFT оповещено: {LIVE_COUNTERS['new_notified']}\n"
                 f"Пропущено из-за ограничения: {LIVE_COUNTERS['new_skipped_limit']}\n"
                 f"Наблюдаемых продаж: {LIVE_COUNTERS['sales_recorded']}\n"
