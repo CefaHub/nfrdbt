@@ -116,3 +116,25 @@ A publicly visible username may also cease to work if the owner changes it.
 gift transfer restrictions and subsequent resale rules should always be
 rechecked inside Telegram before committing money. Neither a received link nor
 an official offer guarantees instant resale eligibility.
+
+
+## Direct owner chat/profile links (2026-10-24)
+
+When `payments.getUniqueStarGift` exposes `owner_id: PeerUser`, the radar
+includes the owner's Telegram numeric ID and a clickable profile link
+even when that user has no public username.
+
+- Public username: `https://t.me/username` — direct chat link.
+- No username but an ID: `tg://user?id=123456789` — may open the profile
+  only if the Telegram client and privacy/user-access checks permit.
+- Owner is a channel / TON wallet / hidden: no invented private-chat link.
+
+Run `/owner MirageLamp-94843` to refresh the current owner and get a
+dedicated profile button. New NFT alerts include a profile link as well,
+and `/offer MirageLamp-94843 1500` uses the same link.
+
+**Warning:** Telegram officially says numeric ID mentions are not
+guaranteed to resolve for unrelated users who never interacted with the
+bot. Numeric IDs do not bypass privacy restrictions. A TON wallet address
+is not a Telegram chat. Use the official NFT purchase offer when possible.
+The bot never sends DMs to strangers automatically.
