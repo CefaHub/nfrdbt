@@ -384,11 +384,9 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                 previous_position = round_robin
                 round_robin = (round_robin + batch_count) % len(candidates)
                 NFT_HEALTH["sweep_progress"] = round_robin
-                if round_robin <= previous_position:
-                    NFT_HEALTH["sweeps_completed"] += 1
-                    NFT_HEALTH["last_sweep_finished"] = now_utc()
+                sweep_wrapped = round_robin <= previous_position
                 checked_this_round = 0
-                for slug, base_id in batch:
+                for batch_index, (slug, base_id) in enumerate(batch):
                     # Temporary cooldown for invalid / not yet upgraded gifts.
                     if UNRESOLVED_UNTIL.get(slug, 0) > asyncio.get_running_loop().time():
                         continue
@@ -453,6 +451,10 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                             state.set_collection_issued(resolved, number)
                             await deliver_pending(bot)
                     except FloodWaitError:
+                        # Do not advance past a gift we couldn't check due to
+                        # Telegram's rate limits. Try it after FloodWait ends.
+                        round_robin = (previous_position + batch_index) % len(candidates)
+                        NFT_HEALTH["sweep_progress"] = round_robin
                         raise
                     except Exception as exc:
                         NFT_HEALTH["errors"] += 1
@@ -463,6 +465,9 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                     # Spread calls across the sweep to reduce rate limits.
                     await asyncio.sleep(NFT_REQUEST_SPACING_SECONDS)
                 NFT_HEALTH["last_batch_successful"] = checked_this_round
+                if sweep_wrapped:
+                    NFT_HEALTH["sweeps_completed"] += 1
+                    NFT_HEALTH["last_sweep_finished"] = now_utc()
                 log.info(
                     "NFT diagnostics: candidates=%d checked=%d total_checked=%d "
                     "progress=%d/%d sweeps=%d target=%ds "
