@@ -21,7 +21,11 @@ HEALTH: dict[str, Any] = {
     "last_event": None, "last_event_type": None, "events_seen": 0,
     "events_valid": 0, "reconnects": 0, "last_error": None,
     "authenticated": False, "last_deal": None,
+    "disabled_kinds": [], "subscribed_kinds": [],
+    "last_notice": None, "event_counts": {},
+    "last_kind_enabled": None, "last_kind_disabled": None,
 }
+
 LOG = logging.getLogger("gift-radar.live")
 
 
@@ -38,6 +42,25 @@ def subscribe_packet(collections: list[str] | None = None) -> dict:
     return packet
 
 
+def _kinds(value: Any) -> list[str]:
+    """Return only known, printable server-supplied event kinds."""
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(
+        item for item in value
+        if isinstance(item, str) and len(item) <= 40
+        and item.replace("_", "").isalnum()
+    ))
+
+
+def _update_disabled(add: list[str] | None = None,
+                     remove: list[str] | None = None) -> None:
+    active = set(HEALTH.get("disabled_kinds") or [])
+    active.update(add or [])
+    active.difference_update(remove or [])
+    HEALTH["disabled_kinds"] = sorted(active)
+
+
 async def consume_socket(ws: Any, on_event: Callable[[dict], Awaitable[None]],
                          token: str = "", collections: list[str] | None = None) -> None:
     """One connection. Reconnect is owned by run_stream."""
@@ -49,6 +72,9 @@ async def consume_socket(ws: Any, on_event: Callable[[dict], Awaitable[None]],
     HEALTH["connected_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     HEALTH["authenticated"] = bool(token)
     HEALTH["last_error"] = None
+    HEALTH["disabled_kinds"] = []
+    HEALTH["subscribed_kinds"] = []
+    HEALTH["last_notice"] = None
     async for raw in ws:
         try:
             msg = json.loads(raw)
@@ -56,16 +82,61 @@ async def consume_socket(ws: Any, on_event: Callable[[dict], Awaitable[None]],
             continue
         if not isinstance(msg, dict):
             continue
-        if msg.get("type") == "error":
-            code = str(msg.get("code") or "unknown")
-            HEALTH["last_error"] = "see.tg WebSocket: " + code[:80]
-            LOG.warning("see.tg control error: %s", code[:80])
+        kind = msg.get("type")
+        if kind == "hello":
+            _update_disabled(add=_kinds(msg.get("disabled")))
+            available = _kinds(msg.get("events"))
+            if available:
+                HEALTH["available_kinds"] = available
             continue
-        if msg.get("type") == "kind_enabled":
+        if kind == "subscribed":
+            active = _kinds(msg.get("events")) or _kinds(msg.get("subscribed"))
+            if active:
+                HEALTH["subscribed_kinds"] = active
+            rejected = _kinds(msg.get("disabled"))
+            if rejected:
+                _update_disabled(add=rejected)
+                HEALTH["last_notice"] = (
+                    "see.tg временно отключил: " + ", ".join(rejected)
+                )
+            continue
+        if kind == "kind_disabled":
+            disabled = _kinds(msg.get("events"))
+            _update_disabled(add=disabled)
+            HEALTH["last_kind_disabled"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            HEALTH["last_notice"] = (
+                "see.tg отключил события: " + ", ".join(disabled or ["неизвестный тип"])
+            )
+            LOG.info("%s", HEALTH["last_notice"])
+            continue
+        if kind == "error":
+            code = str(msg.get("code") or "unknown")[:80]
+            if code == "kind_disabled":
+                disabled = _kinds(msg.get("events"))
+                _update_disabled(add=disabled)
+                HEALTH["last_kind_disabled"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                HEALTH["last_notice"] = (
+                    "see.tg не подписал на отключённые типы: "
+                    + ", ".join(disabled or ["неизвестный тип"])
+                )
+                # This is not a connection failure; other kinds still work.
+                LOG.info("%s", HEALTH["last_notice"])
+            else:
+                HEALTH["last_error"] = "see.tg WebSocket: " + code
+                LOG.warning("see.tg control error: %s", code)
+            continue
+        if kind == "kind_enabled":
+            enabled = _kinds(msg.get("events"))
+            _update_disabled(remove=enabled)
+            HEALTH["last_kind_enabled"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            HEALTH["last_notice"] = "see.tg включил: " + ", ".join(enabled or ["неизвестный тип"])
             await ws.send(json.dumps(subscribe_packet(collections)))
             continue
-        if msg.get("type") != "event":
+        if kind != "event":
             continue
+        event_kind = str(msg.get("event") or "")[:40]
+        event_counts = HEALTH.setdefault("event_counts", {})
+        event_counts[event_kind] = event_counts.get(event_kind, 0) + 1
         HEALTH["events_seen"] += 1
         HEALTH["last_event"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         HEALTH["last_event_type"] = str(msg.get("event"))[:30]
