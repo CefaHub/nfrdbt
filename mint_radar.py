@@ -67,12 +67,12 @@ def is_rare_model(attributes: dict[str, Attribute], max_percent: float) -> bool:
     return model.tier in {"legendary", "epic"}
 
 
-def make_event(unique: Any, attrs: dict[str, Attribute], detected_at: str) -> dict:
+def make_event(unique: Any, attrs: dict[str, Attribute], detected_at: str, rare: bool = True) -> dict:
     model = attrs.get("model")
     backdrop = attrs.get("backdrop")
     pattern = attrs.get("pattern")
     return {
-        "kind": "rare_nft",
+        "kind": "rare_nft" if rare else "new_nft",
         "gift_id": str(getattr(unique, "gift_id", "")),
         "title": str(getattr(unique, "title", "Collectible")),
         "slug": str(getattr(unique, "slug", "")),
