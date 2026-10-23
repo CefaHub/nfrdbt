@@ -15,6 +15,7 @@ from telethon.sessions import StringSession
 
 from radar import Gift, RadarState, now_utc
 from mint_radar import collection_slug, extract_attributes, is_rare_model, make_event
+from candidate_selection import get_candidates
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -111,39 +112,19 @@ async def deliver_pending(bot: TelegramClient) -> None:
 NFT_HEALTH = {
     "candidates": 0, "checked": 0, "discovered": 0, "errors": 0,
     "last_success": None, "last_error": None, "last_found": None,
-    "last_catalog": None, "backlog": 0,
+    "last_catalog": None, "backlog": 0, "unresolved": 0, "last_scan_cycle": None,
 }
 # Avoid retrying an invalid slug every minute. This cache is process-local.
 UNRESOLVED_UNTIL: dict[str, float] = {}
 
 
 def nft_candidates() -> list[tuple[str, int | None]]:
-    """Find candidate collections from the catalog and explicit overrides.
-
-    The catalog contains base gifts, not a stream of newly minted collectibles.
-    Some base gifts have no title, so the numeric gift ID is needed for rescue
-    through Telegram's official resale collection API.
-    """
-    candidates: list[tuple[str, int | None]] = []
-    seen: set[str] = set()
-    for manual in GIFT_COLLECTIONS:
-        slug = collection_slug(manual)
-        if slug and slug not in seen:
-            seen.add(slug)
-            candidates.append((slug, None))
-    for gid, gift in state.data["gifts"].items():
-        title = gift["title"]
-        slug = collection_slug(title)
-        if title.startswith("Подарок #"):
-            slug = ""
-        resolved = state.data.setdefault("resolved_slugs", {}).get(gid, "")
-        slug = resolved or slug
-        if slug and slug not in seen:
-            seen.add(slug)
-            candidates.append((slug, int(gid)))
-        elif not slug:
-            # The catalog may not provide a title; rescue with gift_id later.
-            candidates.append((f"unknown_{gid}", int(gid)))
+    """Only include *upgradable* collectibles, with resolvable collection names."""
+    candidates, unresolved = get_candidates(
+        state.data["gifts"], GIFT_COLLECTIONS,
+        state.data.setdefault("resolved_slugs", {}),
+    )
+    NFT_HEALTH["unresolved"] = unresolved
     return candidates
 
 
@@ -155,19 +136,33 @@ async def get_head_for_collection(
     user: TelegramClient, slug: str, base_id: int | None
 ):
     """Fetch a valid issued counter; recover bad/missing slugs via resale."""
-    if not slug.startswith("unknown_"):
-        try:
-            result = await user(functions.payments.GetUniqueStarGiftRequest(slug=f"{slug}-1"))
-            if int(getattr(result.gift, "availability_issued", -1)) < 0:
-                raise RuntimeError("Telegram omitted availability_issued")
-            return slug_prefix(result.gift.slug), result.gift
-        except FloodWaitError:
-            raise
-        except Exception as exc:
-            # Some #1 items may have disappeared; retry through resale.
-            log.debug("Cannot resolve %s-1 directly: %s", slug, exc)
+    try:
+        result = await user(functions.payments.GetUniqueStarGiftRequest(slug=f"{slug}-1"))
+        first = result.gift
+        if int(getattr(first, "availability_issued", -1)) < 0:
+            raise ValueError("Telegram omitted availability_issued")
+        actual = slug_prefix(first.slug)
+        if not actual:
+            raise ValueError(f"Invalid Telegram slug: {first.slug}")
+        # A gift with the wrong guessed title should NEVER be counted as
+        # another collection. Verify the base gift ID on the live response.
+        if base_id is not None and int(first.gift_id) != base_id:
+            raise ValueError(
+                f"Collection mismatch: expected gift_id={base_id}, "
+                f"got gift_id={first.gift_id} ({actual})"
+            )
+        if base_id is not None:
+            state.data.setdefault("resolved_slugs", {})[str(base_id)] = actual
+            state.save()
+        return actual, first
+    except FloodWaitError:
+        raise
+    except Exception as exc:
+        log.debug("GetUniqueStarGift(%s-1) failed: %s", slug, exc)
+
+    # Official fallback only works if at least one gift is listed for resale.
     if base_id is None:
-        raise ValueError(f"No valid unique collectible found for {slug}-1")
+        raise ValueError(f"Cannot resolve manually configured collection {slug}")
     resale = await user(
         functions.payments.GetResaleStarGiftsRequest(
             gift_id=base_id, offset="", limit=1,
@@ -176,19 +171,18 @@ async def get_head_for_collection(
     found = getattr(resale, "gifts", [])
     if not found:
         raise ValueError(
-            f"Cannot determine real collection slug for gift_id={base_id}; "
-            "not available via resale"
+            f"NFT slug cannot be resolved for gift_id={base_id}: "
+            "no matching collectible and nothing currently on resale"
         )
-    actual = slug_prefix(found[0].slug)
-    if not actual:
-        raise ValueError(f"Unexpected collectible slug for gift_id={base_id}")
-    result = await user(functions.payments.GetUniqueStarGiftRequest(slug=found[0].slug))
-    if str(getattr(result.gift, "gift_id", "")) != str(base_id):
-        raise ValueError("Resale collection ID mismatch")
+    # payments.resaleStarGifts.gifts contains StarGiftUnique values.
+    item = found[0]
+    actual = slug_prefix(item.slug)
+    if not actual or int(getattr(item, "gift_id", -1)) != base_id:
+        raise ValueError(f"Resale mapping validation failed for gift_id={base_id}")
     state.data.setdefault("resolved_slugs", {})[str(base_id)] = actual
     state.save()
-    log.info("Определена коллекция через Telegram: gift_id=%s -> %s", base_id, actual)
-    return actual, result.gift
+    log.info("Resolved NFT collection from resale: gift_id=%s -> %s", base_id, actual)
+    return actual, item
 
 
 async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
@@ -200,6 +194,7 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
             candidates = nft_candidates()
             NFT_HEALTH["candidates"] = len(candidates)
             NFT_HEALTH["backlog"] = 0
+            NFT_HEALTH["last_scan_cycle"] = now_utc()
             if not candidates:
                 NFT_HEALTH["last_error"] = "Нет коллекций из каталога. Проверяй логи payments.getStarGifts."
                 log.warning("NFT: не обнаружено ни одной коллекции-кандидата")
@@ -219,6 +214,7 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                         NFT_HEALTH["checked"] += 1
                         checked_this_round += 1
                         NFT_HEALTH["last_success"] = now_utc()
+                        NFT_HEALTH["last_error"] = None
                         count = int(gift.availability_issued)
                         previous = state.data["collections"].get(resolved)
                         if previous is None:
@@ -291,7 +287,7 @@ async def monitor(user: TelegramClient, bot: TelegramClient) -> None:
             if new_events:
                 log.info("Обнаружено новых событий: %d", len(new_events))
             else:
-                log.info("Проверено подарков: %d; новых улучшений нет", len(gifts))
+                log.info("Каталог: %d подарков; изменений доступности апгрейда нет (НЕ проверка выпуска NFT)", len(gifts))
             await deliver_pending(bot)
         except FloodWaitError as exc:
             delay = max(delay, exc.seconds + 3)
@@ -358,6 +354,7 @@ async def run() -> None:
                 f"📬 В очереди: {len(state.data['pending'])}\n"
                 f"🕒 Последняя проверка каталога: {state.data['last_check'] or 'ещё не было'} (UTC)\n"
                 f"📡 NFT кандидатов: {NFT_HEALTH['candidates']}\n"
+                f"❓ Коллекций без имени: {NFT_HEALTH['unresolved']}\n"
                 f"✅ Проверок NFT: {NFT_HEALTH['checked']}\n"
                 f"📬 Найдено редких NFT: {NFT_HEALTH['discovered']}\n"
                 f"⚠️ Ошибок: {NFT_HEALTH['errors']}\n"
@@ -370,7 +367,8 @@ async def run() -> None:
             head = ", ".join(x[0] for x in candidates[:6]) or "нет"
             await event.respond(
                 "🔎 <b>Диагностика NFT</b>\n"
-                f"Кандидатов: {len(candidates)}; проверено запросов: {NFT_HEALTH['checked']}\n"
+                f"Кандидатов: {len(candidates)}; без названия: {NFT_HEALTH['unresolved']}\n"
+                f"Успешно: {NFT_HEALTH['checked']}; последний успешный: {NFT_HEALTH['last_success'] or 'нет'}\n"
                 f"Известных коллекций: {len(state.data['collections'])}\n"
                 f"Обнаружено: {NFT_HEALTH['discovered']}; backlog: {NFT_HEALTH['backlog']}\n"
                 f"Последняя ошибка: {html.escape(NFT_HEALTH['last_error'] or 'нет')}\n"
