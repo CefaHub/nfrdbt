@@ -124,6 +124,28 @@ class RadarState:
             self.data["pending"] = self.data["pending"] + [event]
         self.save()
 
+    def record_nft_once(self, event: dict[str, Any]) -> bool:
+        """Deduplicate incoming see.tg and MTProto NFT mints persistently.
+
+        Both the free WebSocket and the existing MTProto poller may see the
+        same collectible. Keep the first alert, not two messages per NFT.
+        """
+        slug = str(event.get("slug") or "")
+        if not slug:
+            return False
+        seen = self.data.setdefault("seen_nft_slugs", [])
+        # Include existing pre-v2 notifications when upgrading the bot.
+        prior = set(seen)
+        for old in self.data.get("pending", []) + self.data.get("history", []):
+            if old.get("kind") in {"new_nft", "rare_nft"} and old.get("slug"):
+                prior.add(old["slug"])
+        if slug in prior:
+            return False
+        seen.append(slug)
+        del seen[:-6000]
+        self.record_rare_nft(event)
+        return True
+
     def set_collection_issued(self, slug: str, issued: int) -> None:
         self.data["collections"][slug] = issued
         self.save()
