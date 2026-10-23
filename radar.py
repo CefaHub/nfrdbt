@@ -44,6 +44,7 @@ class RadarState:
             "version": 1,
             "initialized": False,
             "owner_id": None,
+            "activation_consumed": False,
             "paused": False,
             "last_check": None,
             "gifts": {},
@@ -140,6 +141,31 @@ class RadarState:
             raise RuntimeError("Owner is already configured")
         self.data["owner_id"] = user_id
         self.save()
+
+    def consume_activation_key(self, candidate: str, user_id: int) -> bool:
+        """Accept the fixed one-use pairing key exactly once, persisted in data/.
+
+        Existing authenticated owners can burn the key without changing owner.
+        An outsider can never replace an owner even with the key.
+        """
+        from activation import valid_activation_key
+
+        if self.data.get("activation_consumed", False):
+            return False
+        if not valid_activation_key(candidate):
+            return False
+        if self.owner_id is not None and user_id != self.owner_id:
+            return False
+        if self.owner_id is None:
+            self.data["owner_id"] = user_id
+        self.data["activation_consumed"] = True
+        self.save()
+        return True
+
+    def activation_status(self) -> str:
+        if self.data.get("activation_consumed", False):
+            return "использован"
+        return "не использован"
 
     def set_paused(self, paused: bool) -> None:
         self.data["paused"] = paused
