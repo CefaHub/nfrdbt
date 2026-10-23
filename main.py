@@ -70,6 +70,10 @@ DELIVERY_STATS = {
 
 
 def message_for_gift(item: dict) -> str:
+    if item.get("kind") == "delivery_test":
+        return ("✅ <b>ПРОВЕРКА ОЧЕРЕДИ УСПЕШНА</b>\n"
+                "Сообщение прошло через независимый отправитель NFT Radar, "
+                "а не через ответ на команду.")
     title = html.escape(item["title"])
     if item["kind"] in {"rare_nft", "new_nft"}:
         link = f"https://t.me/nft/{item['slug']}"
@@ -580,7 +584,7 @@ async def run() -> None:
                 "/all off — только редкие модели\n"
                 "/check PlushPepe — проверить коллекцию напрямую\n"
                 "/last — последние события\n"
-                "/test — пробное уведомление\n"
+                "/test — пробное уведомление\n"                "/testdelivery — проверить реальную очередь отправки\n"
                 "/pause — отключить уведомления\n"
                 "/resume — включить уведомления\n"
                 "/key — статус одноразового ключа\n"
@@ -872,6 +876,23 @@ async def run() -> None:
                     else:
                         lines.append(f"• {html.escape(x['title'])}: {x['upgrade_stars']}⭐ — {x['created_at']}")
                 await event.respond("\n".join(lines), parse_mode="html")
+        elif cmd == "/testdelivery":
+            synthetic = {
+                "kind": "delivery_test",
+                "event_id": secrets.token_hex(16),
+                "title": "Проверка отправителя",
+                "created_at": now_utc(),
+            }
+            # Priority test: verifies that the dedicated sender really works,
+            # rather than just checking the bot's command handler.
+            state.data["pending"].insert(0, synthetic)
+            state.save()
+            await deliver_pending(bot)
+            await event.respond(
+                "📤 Проверка поставлена в очередь. Ожидай отдельное "
+                "уведомление «ПРОВЕРКА ОЧЕРЕДИ УСПЕШНА». "
+                "Если его нет, отправь /delivery."
+            )
         elif cmd == "/test":
             await event.respond("✅ Тестовое уведомление: бот умеет отправлять сообщения.")
         elif cmd == "/pause":
