@@ -35,6 +35,14 @@ def is_bad_markup(exc: BaseException) -> bool:
 
 def fallback_text(item: dict[str, Any]) -> str:
     kind = item.get("kind", "")
+    if kind == "market_deal":
+        return (
+            "📉 Возможная рыночная сделка (упрощённо)\n"
+            f"https://t.me/nft/{item.get('slug', '')}\n"
+            f"Площадка: {item.get('market', '?')}\n"
+            f"Цена: {item.get('price_display', '?')}\n"
+            "⚠️ Проверь предложение в Telegram; доходность не гарантирована."
+        )
     if kind in {"new_nft", "rare_nft"}:
         slug = str(item.get("slug") or "").strip()
         title = str(item.get("title") or "NFT")
