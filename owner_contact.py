@@ -89,6 +89,36 @@ def owner_contact(unique: Any, response: Any) -> dict[str, Any]:
     return result
 
 
+async def resolve_owner_contact(unique: Any, response: Any, client: Any) -> dict[str, Any]:
+    """Best-effort enrichment if owner_id was actually disclosed by Telegram.
+
+    For PeerUser / PeerChannel only, Telethon may already have a cached full
+    entity, even when payments.uniqueStarGift returned UserEmpty. Never try
+    to infer user IDs from display names or historical owners.
+    """
+    result = owner_contact(unique, response)
+    if result["owner_url"] or result["owner_type"] not in {"user", "channel"}:
+        return result
+    peer = getattr(unique, "owner_id", None)
+    if peer is None:
+        return result
+    try:
+        entity = await client.get_entity(peer)
+    except Exception:
+        return result
+    if result["owner_type"] == "user":
+        if getattr(entity, "id", None) != result["owner_user_id"]:
+            return result
+    elif getattr(entity, "id", None) != getattr(peer, "channel_id", None):
+        return result
+    username = public_username(entity)
+    if username:
+        result["owner_label"] = "@" + username
+        result["owner_url"] = "https://t.me/" + username
+        result["owner_profile_url"] = result["owner_url"]
+    return result
+
+
 def offer_text(unique: Any, amount_stars: int | None = None) -> str:
     title = str(getattr(unique, "title", "NFT"))
     num = getattr(unique, "num", "?")
