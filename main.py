@@ -18,6 +18,7 @@ from radar import Gift, RadarState, now_utc
 from mint_radar import collection_slug, extract_attributes, is_rare_model, make_event
 from candidate_selection import get_candidates
 from owner_contact import owner_contact, resolve_owner_contact, offer_text
+from gift_origin import original_participants, resolve_original_participants, original_buttons
 from deal_watch import valid_gift_slug, deal_snapshot, deal_opportunities, deal_details
 from delivery import dispatch_next, fallback_text
 from scan_pacing import remaining_pause
@@ -76,6 +77,23 @@ DELIVERY_STATS = {
 }
 
 
+def origin_lines(item: dict) -> str:
+    parts = item.get("original_participants") or []
+    if not parts:
+        return ""
+    display = []
+    for p in parts:
+        role = ("Первоначально подарил" if p["role"] == "sender"
+                else "Первоначально получил")
+        label = html.escape(str(p.get("label") or "Неизвестно"))
+        url = p.get("url")
+        if url:
+            label = f'<a href="{html.escape(url, quote=True)}">{label}</a>'
+        display.append(f"📜 {role}: {label}\n")
+    display.append("ℹ️ Это история подарка, НЕ подтверждение нынешнего владельца.\n")
+    return "".join(display)
+
+
 def message_for_gift(item: dict) -> str:
     if item.get("kind") == "delivery_test":
         return ("✅ <b>ПРОВЕРКА ОЧЕРЕДИ УСПЕШНА</b>\n"
@@ -127,6 +145,7 @@ def message_for_gift(item: dict) -> str:
             f"✳️ Символ: {html.escape(item['pattern'])} "
             f"({html.escape(item['pattern_rarity'])})\n"
             f"👤 Владелец: {owner_display}\n"
+            f"{origin_lines(item)}"
             f"{id_line}"
             f"{offer_line}\n"
             f"{contact_note}\n"
@@ -170,6 +189,7 @@ def nft_buttons(item: dict):
             buttons.append([Button.url("✉️ Открыть чат владельца", item["owner_url"])])
         elif item.get("owner_profile_url"):
             buttons.append([Button.url("👤 Открыть профиль по ID", item["owner_profile_url"])])
+    buttons.extend(original_buttons(item.get("original_participants") or [], Button.url))
     return buttons
 
 
@@ -434,6 +454,7 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                                     log.debug("Owner lookup delayed for %s: %s", collectible.slug, exc)
                                     contact = owner_contact(collectible, details)
                                 event.update(contact)
+                                event["original_participants"] = original_participants(collectible, details)
                                 NFT_HEALTH["total_new_nfts"] += 1
                                 NFT_HEALTH["last_nft"] = str(collectible.slug)
                                 if rare:
@@ -629,7 +650,7 @@ async def run() -> None:
                 "/delivery — очередь и ошибки доставки\n"
                 "/diagnose — диагностика NFT\n"
                 "/all on — оповещать обо всех улучшенных NFT\n"
-                "/owner PlushPepe-123 — ссылка на профиль владельца\n"
+                "/owner PlushPepe-123 — ссылка на профиль владельца\n"                "/origin PlushPepe-123 — первый отправитель и получатель\n"
                 "/deal PlushPepe-123 — способы связаться или купить\n"
                 "/watch PlushPepe-123 — следить за продажей\n"
                 "/watches — отслеживаемые NFT; /unwatch СЛАГ — отменить\n"
@@ -802,6 +823,39 @@ async def run() -> None:
                              "отмена — /unwatch НАЗВАНИЕ-НОМЕР.")
                 await event.respond("\n".join(lines), parse_mode="html",
                                     link_preview=False)
+        elif cmd == "/origin":
+            slug = argument.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+            if not valid_gift_slug(slug):
+                await event.respond("Пример: /origin SpicedWine-108832")
+                return
+            try:
+                details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
+                participants = await resolve_original_participants(
+                    details.gift, details, user,
+                )
+                buttons = [[Button.url("🎁 Сам NFT", f"https://t.me/nft/{slug}")]]
+                buttons.extend(original_buttons(participants, Button.url))
+                if participants:
+                    msg = (
+                        f"📜 <b>История NFT {html.escape(slug)}</b>\n\n"
+                        + origin_lines({"original_participants": participants})
+                        + "\nОтправитель и первый получатель — исторические участники. "
+                        "Они могли давно передать или продать подарок."
+                    )
+                else:
+                    msg = (
+                        f"📜 <b>{html.escape(slug)}</b>\n"
+                        "В доступных данных NFT нет первоначальных участников. "
+                        "Это бывает, если история не сохранена или отправитель скрыт.\n"
+                        "Попробуй открыть карточку подарка в Telegram."
+                    )
+                await event.respond(msg, parse_mode="html",
+                                    link_preview=False, buttons=buttons)
+            except FloodWaitError as exc:
+                await event.respond(f"⏳ Telegram ограничил запросы на {exc.seconds} секунд.")
+            except Exception as exc:
+                log.warning("Gift origin unavailable for %s: %s", slug, exc)
+                await event.respond("❌ Не удалось прочитать историю этого подарка.")
         elif cmd == "/owner":
             slug = argument.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
             if not re.fullmatch(r"[A-Za-z0-9]+-[0-9]+", slug):
@@ -843,6 +897,7 @@ async def run() -> None:
                         "но не подтверждённый профиль владельца. "
                         "Даже если у человека есть @username, по одному имени "
                         "нельзя безопасно определить его аккаунт. "
+                        f"Исторические контакты: /origin {slug}\n"
                         f"Включи проверку продажи: /watch {slug}",
                         parse_mode="html",
                         buttons=[[Button.url("🎁 Открыть NFT", f"https://t.me/nft/{slug}")]],
