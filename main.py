@@ -61,7 +61,7 @@ def message_for_gift(item: dict) -> str:
         return (
             ("💎 <b>ЗАСЕЧЁН РЕДКИЙ NFT!</b>\n\n" if item["kind"] == "rare_nft"
              else "🎁 <b>НОВЫЙ NFT ПОСЛЕ УЛУЧШЕНИЯ</b>\n\n")
-            f"🎁 <b>{title} #{item['number']}</b>\n"
+            + f"🎁 <b>{title} #{item['number']}</b>\n"
             f"🔥 Модель: <b>{html.escape(item['model'])}</b> ({item['model_rarity']})\n"
             f"🎨 Фон: {html.escape(item['backdrop'])} ({item['backdrop_rarity']})\n"
             f"✳️ Символ: {html.escape(item['pattern'])} ({item['pattern_rarity']})\n"
