@@ -40,6 +40,7 @@ SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 INTERVAL = max(15, int(os.getenv("CHECK_INTERVAL", "20")))
 NOTIFY_PRICE_CHANGES = os.getenv("NOTIFY_PRICE_CHANGES", "false").lower() in {"true", "yes", "1"}
 TRACK_RARE_NFTS = os.getenv("TRACK_RARE_NFTS", "true").lower() in {"true", "yes", "1"}
+NOTIFY_ALL_NFTS = os.getenv("NOTIFY_ALL_NFTS", "true").lower() in {"true", "yes", "1"}
 NFT_SCAN_INTERVAL = max(5, int(os.getenv("NFT_SCAN_INTERVAL", "20")))
 COLLECTIONS_PER_CYCLE = max(1, int(os.getenv("COLLECTIONS_PER_CYCLE", "5")))
 MAX_NEW_NFTS_PER_CYCLE = max(1, int(os.getenv("MAX_NEW_NFTS_PER_CYCLE", "25")))
@@ -55,10 +56,11 @@ DELIVERY_LOCK = asyncio.Lock()
 
 def message_for_gift(item: dict) -> str:
     title = html.escape(item["title"])
-    if item["kind"] == "rare_nft":
+    if item["kind"] in {"rare_nft", "new_nft"}:
         link = f"https://t.me/nft/{item['slug']}"  # Actual slug returned by Telegram.
         return (
-            "💎 <b>ЗАСЕЧЁН РЕДКИЙ NFT!</b>\n\n"
+            ("💎 <b>ЗАСЕЧЁН РЕДКИЙ NFT!</b>\n\n" if item["kind"] == "rare_nft"
+             else "🎁 <b>НОВЫЙ NFT ПОСЛЕ УЛУЧШЕНИЯ</b>\n\n")
             f"🎁 <b>{title} #{item['number']}</b>\n"
             f"🔥 Модель: <b>{html.escape(item['model'])}</b> ({item['model_rarity']})\n"
             f"🎨 Фон: {html.escape(item['backdrop'])} ({item['backdrop_rarity']})\n"
@@ -113,9 +115,16 @@ NFT_HEALTH = {
     "candidates": 0, "checked": 0, "discovered": 0, "errors": 0,
     "last_success": None, "last_error": None, "last_found": None,
     "last_catalog": None, "backlog": 0, "unresolved": 0, "last_scan_cycle": None,
+    "total_new_nfts": 0, "total_rare_nfts": 0, "notified_nfts": 0,
+    "last_nft": None,
 }
 # Avoid retrying an invalid slug every minute. This cache is process-local.
 UNRESOLVED_UNTIL: dict[str, float] = {}
+
+
+def all_nft_notifications() -> bool:
+    """Persistent on/off mode controlled by the authorized bot owner."""
+    return bool(state.data.get("notify_all_nfts", NOTIFY_ALL_NFTS))
 
 
 def nft_candidates() -> list[tuple[str, int | None]]:
@@ -237,15 +246,25 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                                 await user(functions.payments.GetUniqueStarGiftRequest(
                                     slug=f"{resolved}-{number}"))
                             ).gift
-                            # Crafting also creates unique gifts, but is not a normal upgrade.
+                            # Crafting has its own minting process; the radar tracks upgrades.
                             if not getattr(collectible, "crafted", False):
                                 attrs = extract_attributes(collectible)
-                                if is_rare_model(attrs, MAX_MODEL_RARITY_PCT):
-                                    event = make_event(collectible, attrs, now_utc())
+                                rare = is_rare_model(attrs, MAX_MODEL_RARITY_PCT)
+                                event = make_event(collectible, attrs, now_utc(), rare=rare)
+                                NFT_HEALTH["total_new_nfts"] += 1
+                                NFT_HEALTH["last_nft"] = str(collectible.slug)
+                                if rare:
+                                    NFT_HEALTH["total_rare_nfts"] += 1
+                                if rare or all_nft_notifications():
                                     state.record_rare_nft(event)
+                                    NFT_HEALTH["notified_nfts"] += 1
                                     NFT_HEALTH["discovered"] += 1
                                     NFT_HEALTH["last_found"] = now_utc()
-                                    log.info("Rare upgrade discovered: %s", collectible.slug)
+                                log.info(
+                                    "NFT UPGRADE: %s | model=%s | rarity=%s | rare=%s | queued=%s",
+                                    collectible.slug, event["model"], event["model_rarity"],
+                                    rare, rare or all_nft_notifications(),
+                                )
                             state.set_collection_issued(resolved, number)
                             await deliver_pending(bot)
                     except FloodWaitError:
@@ -333,13 +352,15 @@ async def run() -> None:
                 "📡 <b>Gift Upgrade Radar</b>\n\n"
                 "/status — состояние\n"
                 "/diagnose — диагностика NFT\n"
+                "/all on — оповещать обо всех улучшенных NFT\n"
+                "/all off — только редкие модели\n"
                 "/check PlushPepe — проверить коллекцию напрямую\n"
                 "/last — последние события\n"
                 "/test — пробное уведомление\n"
                 "/pause — отключить уведомления\n"
                 "/resume — включить уведомления\n"
                 "/help — команды\n\n"
-                "Ловлю открытие апгрейдов и редкие NFT после улучшений.", parse_mode="html"
+                "Отслеживаю выпуск улучшенных NFT; включить все: /all on.", parse_mode="html"
             )
         elif cmd == "/status":
             gifts = state.data["gifts"]
@@ -353,6 +374,8 @@ async def run() -> None:
                 f"коллекций с baseline: {len(state.data['collections'])}\n"
                 f"🔥 Редкая модель: ≤ {MAX_MODEL_RARITY_PCT:g}% или tier epic/legendary\n"
                 f"📬 В очереди: {len(state.data['pending'])}\n"
+                f"🔔 Все новые NFT: {'включено' if all_nft_notifications() else 'только редкие'}\n"
+                f"🆕 Увидено новых NFT: {NFT_HEALTH['total_new_nfts']} (редких: {NFT_HEALTH['total_rare_nfts']})\n"
                 f"🕒 Последняя проверка каталога: {state.data['last_check'] or 'ещё не было'} (UTC)\n"
                 f"📡 NFT кандидатов: {NFT_HEALTH['candidates']}\n"
                 f"❓ Коллекций без имени: {NFT_HEALTH['unresolved']}\n"
@@ -371,7 +394,9 @@ async def run() -> None:
                 f"Кандидатов: {len(candidates)}; без названия: {NFT_HEALTH['unresolved']}\n"
                 f"Успешно: {NFT_HEALTH['checked']}; последний успешный: {NFT_HEALTH['last_success'] or 'нет'}\n"
                 f"Известных коллекций: {len(state.data['collections'])}\n"
-                f"Обнаружено: {NFT_HEALTH['discovered']}; backlog: {NFT_HEALTH['backlog']}\n"
+                f"Новых NFT просмотрено: {NFT_HEALTH['total_new_nfts']}; редких: {NFT_HEALTH['total_rare_nfts']}\n"
+                f"Оповещений поставлено: {NFT_HEALTH['notified_nfts']}; backlog: {NFT_HEALTH['backlog']}\n"
+                f"Уведомления: {'все NFT' if all_nft_notifications() else 'только редкие'}\n"
                 f"Последняя ошибка: {html.escape(NFT_HEALTH['last_error'] or 'нет')}\n"
                 f"Примеры: {html.escape(head)}", parse_mode="html"
             )
@@ -401,6 +426,21 @@ async def run() -> None:
                     f"{html.escape(type(exc).__name__ + ': ' + str(exc)[:120])}",
                     parse_mode="html",
                 )
+        elif cmd == "/all":
+            value = argument.lower()
+            if value in {"on", "off"}:
+                state.data["notify_all_nfts"] = value == "on"
+                state.save()
+                await event.respond(
+                    "🔔 Отныне оповещаю о КАЖДОМ обнаруженном улучшенном NFT."
+                    if value == "on" else
+                    "💎 Отныне оповещаю только о редких моделях (до порога или Epic/Legendary)."
+                )
+            else:
+                await event.respond(
+                    f"🔔 Режим: {'все NFT' if all_nft_notifications() else 'только редкие'}."
+                    " Команды: /all on или /all off"
+                )
         elif cmd == "/last":
             recent = state.data["history"][-10:]
             if not recent:
@@ -408,8 +448,9 @@ async def run() -> None:
             else:
                 lines = ["🗂 <b>Последние события</b>"]
                 for x in reversed(recent):
-                    if x["kind"] == "rare_nft":
-                        lines.append(f"💎 {html.escape(x['title'])} #{x['number']} — {x['model_rarity']}")
+                    if x["kind"] in {"rare_nft", "new_nft"}:
+                        icon = "💎" if x["kind"] == "rare_nft" else "🎁"
+                        lines.append(f"{icon} {html.escape(x['title'])} #{x['number']} — {x['model_rarity']}")
                     else:
                         lines.append(f"• {html.escape(x['title'])}: {x['upgrade_stars']}⭐ — {x['created_at']}")
                 await event.respond("\n".join(lines), parse_mode="html")
