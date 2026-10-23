@@ -201,3 +201,38 @@ Polling cannot identify a hidden Telegram account from the owner's
 display name. It doesn't send private messages or make a purchase.
 An official offer without owner_id is not available through MTProto.
 All monetary decisions remain with the user in the Telegram client.
+
+## Notification delivery fix — October 24, 2026
+
+NFT discovery and Telegram message sending are now independent tasks.
+The scanner only appends new NFT events to the persistent delivery outbox;
+a separate worker sends them at a controlled rate (about 1 every 1.5 s).
+
+- No 100-event truncation: old notifications are retained until acknowledged.
+- New and rare NFTs use the same reliable queue (`/all on` for all models).
+- Telegram FloodWait and temporary network problems trigger automatic retries.
+- If Telegram rejects HTML/buttons for an NFT, the worker sends a plain
+  text fallback containing the NFT title and clickable NFT URL.
+- An alert is removed from the queue only after a successful send.
+- Delivery failures do not block collection scanning.
+- On restart, previously unsent alerts are retried automatically.
+- The one-time activation key, owner binding and previous baselines
+  in `/app/data/state.json` are preserved.
+
+Use `/delivery` to inspect the queue, last successful send, retry count,
+and last error without having to restart the bot. `/status` also includes
+the queue size and sender error. If a user blocked the bot, or the bot
+loses permission to message them, Telegram may continue rejecting sends;
+in that case `/delivery` shows the reason while events stay queued.
+
+Telegram deliveries are at-least-once rather than mathematically exactly
+once: if the network loses an acknowledgement after Telegram has already
+sent a message, a retry can rarely duplicate it. The bot does not
+silently discard that event.
+
+Collection detection is still polling, not a Telegram push stream:
+the time to scan all collections depends on `NFT_SCAN_INTERVAL` and
+`COLLECTIONS_PER_CYCLE`. Default 5 collections per 20 seconds means
+121 collections can take around 8 minutes per sweep, not including
+extra NFT detail requests or Telegram rate limits. More aggressive
+settings can incur FloodWait, so tune with live logs.
