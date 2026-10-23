@@ -12,7 +12,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Compile Python files
-        run: python -m compileall -q main.py radar.py mint_radar.py delivery.py deal_watch.py owner_contact.py candidate_selection.py activation.py gen_session.py check_network.py tests
+        run: python -m compileall -q main.py radar.py mint_radar.py delivery.py deal_watch.py owner_contact.py gift_origin.py candidate_selection.py activation.py gen_session.py check_network.py tests
       - name: Install runtime dependencies for notification tests
         run: python -m pip install -r requirements.txt
       - name: Test Gift Radar logic and Telegram send arguments
