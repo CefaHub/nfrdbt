@@ -320,8 +320,10 @@ async def get_head_for_collection(
                 f"got gift_id={first.gift_id} ({actual})"
             )
         if base_id is not None:
-            state.data.setdefault("resolved_slugs", {})[str(base_id)] = actual
-            state.save()
+            mapping = state.data.setdefault("resolved_slugs", {})
+            if mapping.get(str(base_id)) != actual:
+                mapping[str(base_id)] = actual
+                state.save()
         return actual, first
     except FloodWaitError:
         raise
@@ -347,8 +349,10 @@ async def get_head_for_collection(
     actual = slug_prefix(item.slug)
     if not actual or int(getattr(item, "gift_id", -1)) != base_id:
         raise ValueError(f"Resale mapping validation failed for gift_id={base_id}")
-    state.data.setdefault("resolved_slugs", {})[str(base_id)] = actual
-    state.save()
+    mapping = state.data.setdefault("resolved_slugs", {})
+    if mapping.get(str(base_id)) != actual:
+        mapping[str(base_id)] = actual
+        state.save()
     log.info("Resolved NFT collection from resale: gift_id=%s -> %s", base_id, actual)
     return actual, item
 
@@ -568,7 +572,10 @@ def command_name(text: str) -> tuple[str, str]:
 async def run() -> None:
     # Hosted mode is noninteractive: authenticate using a pre-generated String Session.
     user_session = StringSession(SESSION_STRING) if SESSION_STRING else str(DATA_DIR / "user")
-    user = TelegramClient(user_session, API_ID, API_HASH)
+    user = TelegramClient(
+        user_session, API_ID, API_HASH,
+        flood_sleep_threshold=0,  # Expose FloodWait instead of silently pausing.
+    )
     bot = TelegramClient(
         str(DATA_DIR / "bot"), API_ID, API_HASH,
         flood_sleep_threshold=0,  # Worker handles rate limits independently.
