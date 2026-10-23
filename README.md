@@ -14,7 +14,7 @@ This repository contains a Telegram gift upgrade monitoring prototype designed f
    - `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` — **prefer your own** credentials; the values in `.env.example` are public *test* keys and may be rejected
    - `CHECK_INTERVAL=60`, `NFT_SCAN_INTERVAL=60`, `DATA_DIR=/app/data`
    - `PAIR_CODE` — optional binding code; otherwise inspect hosting logs for it.
-6. Start the bot. Send `/start CODE` from your primary account, then `/status` and `/test`.
+6. Start the bot. Send `/start CODE` from your primary account, then `/status` and `/test`; use `/diagnose` to inspect NFT collection discovery and errors.
 
 ## Limitations
 
@@ -31,3 +31,18 @@ Run `check_network_windows.bat`. If it fails, try another network. If TCP connec
 - https://bothost.ru/docs/telegram-userbot-setup
 - https://bothost.ru/docs/environment-variables
 - https://bothost.ru/docs/main-file-entrypoint
+
+## Why am I not receiving upgrade notifications?
+
+There are two independent checks:
+
+- \`payments.getStarGifts\` checks whether the **upgrade option** has opened for a base gift (not whether someone upgraded it).
+- The collectible watcher checks \`payments.getUniqueStarGift\`, reads its \`availability_issued\` count and fetches newly numbered gifts after establishing a baseline.
+
+Use \`/diagnose\` in the bot. The output includes: candidate collections, successful NFT requests, error count, last error and backlog.
+
+If there are 0 successful NFT requests, the watcher has **not** confirmed it can see newly minted NFTs. The new scanner tries public official resale listings to discover the true collection slug when the catalog title cannot be converted to a valid slug. This fallback works only when Telegram returns a suitable resale gift. You can optionally set \`GIFT_COLLECTIONS=PlushPepe,AnotherCollection\` with **real** collection slugs (not human titles). Known slugs only; don't invent names.
+
+If the counter has an initial value but no new numbers, the bot won't send historical NFT notifications. Subsequent numbers are scanned if the count increases.
+
+**Limits:** Telegram does not provide a public push feed of every upgrade. Request throttling, missing collections, batching, server errors and short bursts can delay or prevent detection. Market resale availability/transfer restrictions must be assessed independently. This bot neither automatically buys NFTs nor guarantees profit or instant delivery.
