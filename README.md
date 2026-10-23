@@ -300,3 +300,29 @@ skips the collection at which FloodWait occurred.
 
 Persistent pairing, stored baseline NFT counters and unacknowledged
 notification events are preserved under `/app/data/state.json`.
+
+## Original gift participants (historical contact links)
+
+The Telegram collectible API can expose a
+`StarGiftAttributeOriginalDetails` attribute containing `sender_id` and
+`recipient_id` for the gift before it was upgraded. The first recipient
+is not necessarily the current NFT owner. The gift may have changed hands
+multiple times; this historic evidence must never be labelled as current ownership.
+
+- Run `/origin SpicedWine-108832` or `/origin PartySparkler-189558`.
+- The bot creates separate buttons **Кто подарил (история)** and
+  **Первый получатель** when Telegram includes the original participants.
+- New NFT alerts show the same history links when the metadata is available.
+- If a public username can be confirmed from Telegram, open
+  `https://t.me/username`. If only a user ID is exposed, a
+  `tg://user?id=...` link is offered but it may fail under Telegram privacy
+  or entity-access rules.
+- An anonymous original sender is not reconstructed or guessed.
+- If the original details were removed or never retained, the bot
+  explicitly reports that no original contacts are available.
+
+This is a contact/history navigation aid, **not** a method to deanonymize
+a currently hidden NFT holder. For verified market sales, open the
+Telegram collectible's official sale/offer page. For additional
+public transfer records, independent services such as see.tg may help;
+their historical claims should be treated as unverified until cross-checked.
