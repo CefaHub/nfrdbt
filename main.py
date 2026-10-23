@@ -543,8 +543,11 @@ async def run() -> None:
                     await event.respond(
                         f"🎁 NFT: {html.escape(slug)}\n"
                         f"👤 Владелец: {html.escape(contact['owner_label'])}\n"
-                        "🔐 Telegram не раскрыл личный аккаунт владельца. "
-                        "Проверь страницу NFT и официальную кнопку оффера.",
+                        f"📋 Тип данных: {html.escape(str(contact.get('owner_type', 'unknown')))}\n"
+                        "🔐 Telegram передал отображаемое имя или кошелёк, "
+                        "но не подтверждённый профиль владельца. "
+                        "Даже если у человека есть @username, по одному имени "
+                        "нельзя безопасно определить его аккаунт.",
                         parse_mode="html",
                         buttons=[[Button.url("🎁 Открыть NFT", f"https://t.me/nft/{slug}")]],
                     )
