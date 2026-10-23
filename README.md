@@ -269,3 +269,34 @@ Telegram generates and caches the visual card itself. The program
 cannot guarantee that the recipient's Telegram client renders
 the exact preview appearance every time, and bot-side settings
 or Telegram previews being unavailable can affect rendering.
+
+## October 24: one-minute NFT sweep pacing and clearer scan timestamps
+
+These independent timestamps and settings must not be confused:
+
+- `/delivery` **last send** means the last message actually sent to the owner.
+  It can remain unchanged for hours if no new upgraded NFT was observed.
+- `/status` and `/diagnose` **last NFT batch** mean the last collection-scan
+  pass. `last successful NFT request` confirms metadata access.
+- `CHECK_INTERVAL=60` polls the base **gift catalog** every minute.
+- `NFT_SCAN_INTERVAL=60` (or optional `NFT_SWEEP_SECONDS=60`) now targets
+  checking **all** known NFT collections within ~60 seconds, not waiting
+  a full minute between batches of five.
+- `COLLECTIONS_PER_CYCLE=5` is only a round-robin batch size. The delay
+  between those batches is scaled to cover the whole collection set
+  during the target sweep; `NFT_REQUEST_SPACING_SECONDS=0.40` paces calls.
+
+With 121 collections, a five-item batch starts roughly every 2.5 seconds
+when the Telegram API responds fast enough. The actual duration can exceed
+the target if extra newly minted NFTs must be fetched, host/network latency
+rises, or Telegram enforces rate limits (FloodWait). We cannot guarantee
+one-minute detection or that every NFT becomes visible immediately.
+
+Use `/status` to see sweep progress (x/121), last NFT batch and last full
+sweep. The same progress is visible in `/delivery`, separate from last send.
+`/diagnose` shows API successes and current collection coverage.
+Telegram throttling pauses the scanner and is logged; it also no longer
+skips the collection at which FloodWait occurred.
+
+Persistent pairing, stored baseline NFT counters and unacknowledged
+notification events are preserved under `/app/data/state.json`.
