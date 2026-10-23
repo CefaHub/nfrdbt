@@ -380,7 +380,7 @@ async def run() -> None:
                 f"📡 NFT кандидатов: {NFT_HEALTH['candidates']}\n"
                 f"❓ Коллекций без имени: {NFT_HEALTH['unresolved']}\n"
                 f"✅ Проверок NFT: {NFT_HEALTH['checked']}\n"
-                f"📬 Найдено редких NFT: {NFT_HEALTH['discovered']}\n"
+                f"📬 Уведомлений создано: {NFT_HEALTH['notified_nfts']}\n"
                 f"⚠️ Ошибок: {NFT_HEALTH['errors']}\n"
                 f"🕒 Последний успешный NFT-запрос: {NFT_HEALTH['last_success'] or 'ни одного'}\n"
                 f"❗ Ошибка NFT: {html.escape(NFT_HEALTH['last_error'] or 'нет')}",
