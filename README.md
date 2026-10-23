@@ -326,3 +326,30 @@ a currently hidden NFT holder. For verified market sales, open the
 Telegram collectible's official sale/offer page. For additional
 public transfer records, independent services such as see.tg may help;
 their historical claims should be treated as unverified until cross-checked.
+
+## Automatic public contact discovery (2026-10-24)
+
+Every newly discovered NFT triggers automatic, bounded checks of three
+separate *Telegram-provided* sources in parallel:
+
+1. CURRENT OWNER: exact owner peer ID from the collectible metadata,
+   with a public username if Telegram returns or resolves it.
+2. ORIGINAL GIFT CONTACTS: the publicly exposed original sender and
+   first recipient in StarGiftAttributeOriginalDetails, when retained.
+3. HOSTED PROFILE: a public Telegram profile listed as host_id.
+   This is a DISPLAY profile, not necessarily the NFT holder (especially
+   when a TON wallet actually owns the gift).
+
+Results appear with separate labels and buttons in new NFT alerts.
+Run `/owner SpicedWine-108832` to execute this combined lookup for an
+existing NFT: it now includes all available related public profiles
+automatically, with a clear distinction between CURRENT and HISTORICAL.
+
+The bot does NOT identify a private/hidden current owner by guessing from
+an arbitrary display name. A historic sender or a public host cannot
+be safely promoted to 'current owner' without present-day owner evidence.
+Public discovery does not authorize unsolicited bulk DM messaging.
+
+External source: see.tg documents a public gift/owner API, but using it
+requires a separate see.tg app token and may incur TON costs. No external
+API authorization or paid lookups are activated by this code update.
