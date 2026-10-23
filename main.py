@@ -775,7 +775,8 @@ async def run() -> None:
         elif cmd in ("/start", "/help"):
             await event.respond(
                 "📡 <b>Gift Upgrade Radar</b>\n\n"
-                "/status — состояние\n"
+                "/status — состояние\n"                "/live — статус see.tg WebSocket и ограничений\n"
+                "/value PlushPepe-123 — цена и продажи из live-потока\n"
                 "/delivery — очередь и ошибки доставки\n"
                 "/diagnose — диагностика NFT\n"
                 "/all on — оповещать обо всех улучшенных NFT\n"
@@ -803,6 +804,7 @@ async def run() -> None:
                 f"📡 <b>Радар {'⏸ на паузе' if state.data['paused'] else '🟢 активен'}</b>\n"
                 f"⏱ Каталог подарков: каждые {INTERVAL} сек\n"
                 f"💎 NFT: цель полного обхода {NFT_SWEEP_SECONDS} сек ({COLLECTIONS_PER_CYCLE} за пакет)\n"
+                f"⚡ see.tg Live: {html.escape(LIVE_HEALTH['status'])}, новых NFT: {LIVE_COUNTERS['new_notified']}\n"
                 f"🎁 Известных подарков: {len(gifts)}\n"
                 f"✨ С доступным апгрейдом: {upgradeable}\n"
                 f"💎 Радар NFT: {'включён' if TRACK_RARE_NFTS else 'выключен'}; "
@@ -826,6 +828,57 @@ async def run() -> None:
                 f"🕒 Последний успешный NFT-запрос: {NFT_HEALTH['last_success'] or 'ни одного'}\n"
                 f"❗ Ошибка NFT: {html.escape(NFT_HEALTH['last_error'] or 'нет')}",
                 parse_mode="html",
+            )
+        elif cmd == "/live":
+            await event.respond(
+                "⚡ <b>NFT Radar 2.0 — see.tg Live</b>\n"
+                f"Подключение: {html.escape(LIVE_HEALTH['status'])}\n"
+                f"Режим: {'авторизованный' if LIVE_API_TOKEN else 'гость (имена могут быть скрыты)'}\n"
+                "REST-запросы: отключены; платных запросов: 0\n"
+                f"Событий потока: {LIVE_HEALTH['events_seen']}\n"
+                f"Новых NFT оповещено: {LIVE_COUNTERS['new_notified']}\n"
+                f"Пропущено из-за ограничения: {LIVE_COUNTERS['new_skipped_limit']}\n"
+                f"Наблюдаемых продаж: {LIVE_COUNTERS['sales_recorded']}\n"
+                f"Возможных сделок отправлено: {LIVE_COUNTERS['deals_notified']}\n"
+                f"Последнее событие: {LIVE_HEALTH['last_event'] or 'нет'}\n"
+                f"Переподключений: {LIVE_HEALTH['reconnects']}\n"
+                f"Ошибка: {html.escape(LIVE_HEALTH['last_error'] or 'нет')}\n"
+                f"Лимит новых NFT: {LIVE_MAX_NEW_PER_MINUTE}/мин, "
+                f"порог скидки: {(1 - LIVE_BARGAIN_RATIO)*100:g}%",
+                parse_mode="html",
+            )
+        elif cmd == "/value":
+            slug = argument.strip().split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+            if not valid_gift_slug(slug):
+                await event.respond("Пример: /value SpicedWine-108832")
+                return
+            listing = (state.data.get("live_last_listings") or {}).get(slug)
+            if not listing:
+                await event.respond(
+                    f"📊 {slug}: рыночная цена ещё не встречалась в потоке.\n"
+                    "WebSocket не выгружает историю прошлых продаж. "
+                    "Оценка появится, когда будут наблюдения live."
+                )
+                return
+            sample = listing["event"]
+            score = estimate_listing(state.data, sample, threshold=LIVE_BARGAIN_RATIO)
+            if score.get("comparable"):
+                detail = (
+                    f"Медиана: {score['median_ton']:g} TON\n"
+                    f"Сравнение: {score['sample_size']} продаж; {score['scope']}\n"
+                    f"Отклонение: {score['discount_pct']:+g}% от медианы\n"
+                    f"Возможная недооценка: {'да, предварительно' if score['potential_bargain'] else 'не выявлена'}"
+                )
+            else:
+                detail = "Недостаточно данных: " + str(score.get("reason"))
+            await event.respond(
+                f"📊 <b>Оценка {html.escape(slug)}</b>\n"
+                f"Наблюдаемая цена: {html.escape((sample.get('price') or {}).get('display') or 'не указана')}\n"
+                f"Площадка: {html.escape(sample.get('market', '?'))}\n"
+                f"{html.escape(detail)}\n\n"
+                "⚠️ Только наблюдаемые сделки в live-потоке, не финансовая рекомендация.",
+                parse_mode="html",
+                buttons=[[Button.url("🎁 Открыть NFT", f"https://t.me/nft/{slug}")]],
             )
         elif cmd == "/delivery":
             pending = state.data.get("pending") or []
