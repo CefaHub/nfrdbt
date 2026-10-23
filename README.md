@@ -353,3 +353,45 @@ Public discovery does not authorize unsolicited bulk DM messaging.
 External source: see.tg documents a public gift/owner API, but using it
 requires a separate see.tg app token and may incur TON costs. No external
 API authorization or paid lookups are activated by this code update.
+
+## NFT Radar 2.0 — see.tg Live (2026-10-24)
+
+Source: https://kartoshka.free/#ws | Live feed: https://live.see.tg/
+
+**No paid see.tg REST queries are performed.** The integration does not
+call chargeable /gift, /who or owner-search endpoints and never spends TON.
+see.tg charges after 100 free daily REST requests; /who costs extra.
+Our integration uses only the free guest WebSocket stream.
+
+- `LIVE_ENABLED=true`: connect to wss://live.see.tg/v1/ws (no token needed).
+- `SEE_TG_API_TOKEN=`: optional private token from see.tg mini app,
+  Useful -> API. With it the same free WSS feed can reveal PUBLIC profile
+  identifiers. Never publish this token or insert it into GitHub.
+- `LIVE_COLLECTIONS=PlushPepe,SpicedWine`: optional server-side filter;
+  blank receives gifts from all collections.
+- `LIVE_NOTIFY_NEW=true`, `LIVE_NOTIFY_BARGAINS=true` by default.
+- `LIVE_MAX_NEW_PER_MINUTE=15`: limit global live upgrade notifications;
+  existing MTProto scanner continues as a slower backup.
+- `LIVE_BARGAIN_RATIO=0.75`: only flag listings at or below 75 percent
+  of the observed-sale median, if at least three comparable sales exist.
+
+Bot commands: `/live` shows connection/errors/last event and alert limits.
+`/value SpicedWine-108832` shows the last observed listing and any
+indicative comparison. `/status` and `/delivery` keep the old diagnostics.
+
+**Live stream is best effort, not a complete historical database.**
+Signals compare recent observed live sales only, preferably for the same
+model; when insufficient, the entire collection is used and labeled as
+a weaker comparison. Without enough data the program will NOT invent
+a fair value. EUR/USD/USDT/Stars are not converted to TON unless the
+stream explicitly supplies normalized TON. Market fees, wash trading,
+bid depth and gift-specific rarity are not accounted for.
+
+New NFT and bargain alerts reuse the persistent notification queue,
+Telegram link previews, and explicit public seller links when the
+see.tg event exposes a real public @username. Guest feed masks some names.
+Historical sender and first recipient are NOT treated as current owners.
+No trades, bulk direct messages or wallet transfers are performed.
+
+Existing one-use activation key, owner pairing, /app/data state,
+unacknowledged alerts and original MTProto collector are retained.
