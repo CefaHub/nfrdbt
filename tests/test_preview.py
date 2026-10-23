@@ -52,6 +52,31 @@ class PreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bot.send_message.await_args.kwargs["link_preview"])
         self.assertIn("https://t.me/nft/PartySparkler-189558", body)
 
+    async def test_historical_contacts_appear_in_nft_alert_not_as_owner(self):
+        item = nft_item()
+        item["owner_label"] = "Private Current Owner"
+        item["owner_type"] = "name"
+        item["owner_url"] = None
+        item["owner_profile_url"] = None
+        item["original_participants"] = [
+            {"role": "sender", "label": "@MillerPublic",
+             "url": "https://t.me/MillerPublic"},
+            {"role": "recipient", "label": "@DariiiPublic",
+             "url": "https://t.me/DariiiPublic"},
+        ]
+        msg = message_for_gift(item)
+        self.assertIn("Первоначально подарил", msg)
+        self.assertIn("Первоначально получил", msg)
+        self.assertIn("НЕ подтверждение нынешнего владельца", msg)
+        self.assertIn("Владелец: Private Current Owner", msg)
+        bot = SimpleNamespace(send_message=AsyncMock())
+        await send_alert(bot, 42, msg, item)
+        kwargs = bot.send_message.await_args.kwargs
+        self.assertTrue(kwargs["link_preview"])
+        self.assertEqual(len(kwargs["buttons"]), 3)
+        self.assertIn("Кто подарил", kwargs["buttons"][1][0].text)
+        self.assertIn("Первый получатель", kwargs["buttons"][2][0].text)
+
     async def test_non_nft_message_does_not_show_link_preview(self):
         item = {
             "kind": "upgrade_unlocked",
