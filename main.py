@@ -19,6 +19,7 @@ from mint_radar import collection_slug, extract_attributes, is_rare_model, make_
 from candidate_selection import get_candidates
 from owner_contact import owner_contact, resolve_owner_contact, offer_text
 from deal_watch import valid_gift_slug, deal_snapshot, deal_opportunities, deal_details
+from delivery import dispatch_next, fallback_text
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -54,7 +55,18 @@ GIFT_COLLECTIONS = [x.strip() for x in os.getenv("GIFT_COLLECTIONS", "").split("
 DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if os.getenv("BOT_ID") else "data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 state = RadarState(DATA_DIR / "state.json")
-DELIVERY_LOCK = asyncio.Lock()
+DELIVERY_WAKE = asyncio.Event()
+DELIVERY_STATS = {
+    "sent": 0,
+    "plain": 0,
+    "errors": 0,
+    "retries": 0,
+    "last_sent": None,
+    "last_error": None,
+    "last_error_at": None,
+    "last_slug": None,
+    "next_delay_sec": 0,
+}
 
 
 def message_for_gift(item: dict) -> str:
@@ -157,20 +169,82 @@ async def send_alert(bot: TelegramClient, chat_id: int, text: str, item: dict | 
 
 
 async def deliver_pending(bot: TelegramClient) -> None:
-    owner_id = state.owner_id
-    if owner_id is None or state.data["paused"]:
-        return
-    async with DELIVERY_LOCK:
-        for item in list(state.data["pending"]):
-            try:
-                await send_alert(bot, owner_id, message_for_gift(item), item)
-            except FloodWaitError as exc:
-                log.warning("Bot flood wait: %s sec", exc.seconds)
-                return
-            except Exception as exc:
-                log.warning("Не удалось отправить уведомление: %s", exc)
-                return
-            state.pop_delivered(item["event_id"])
+    """Wake the independent notification worker; never wait for Telegram here."""
+    DELIVERY_WAKE.set()
+
+
+async def delivery_worker(bot: TelegramClient) -> None:
+    """Send persisted events independently of NFT discovery.
+
+    Event queue survives restarts. Scan tasks only enqueue and signal,
+    while this worker handles Telegram FloodWait/transport errors.
+    """
+    backoff = 2.0
+    while True:
+        try:
+            if not state.owner_id or state.data.get("paused") or not state.data["pending"]:
+                DELIVERY_WAKE.clear()
+                try:
+                    await asyncio.wait_for(DELIVERY_WAKE.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            async def send_rich(item: dict) -> None:
+                await send_alert(bot, state.owner_id, message_for_gift(item), item)
+
+            async def send_plain(item: dict) -> None:
+                await bot.send_message(
+                    state.owner_id,
+                    fallback_text(item),
+                    link_preview=False,
+                )
+
+            result, item = await asyncio.wait_for(
+                dispatch_next(state, send_rich, send_plain), timeout=45,
+            )
+            if result == "idle":
+                await asyncio.sleep(0.5)
+                continue
+
+            DELIVERY_STATS["sent"] += 1
+            DELIVERY_STATS["plain"] += int(result == "plain")
+            DELIVERY_STATS["last_sent"] = now_utc()
+            DELIVERY_STATS["last_slug"] = (item or {}).get("slug")
+            DELIVERY_STATS["last_error"] = None
+            DELIVERY_STATS["next_delay_sec"] = 0
+            log.info(
+                "DELIVERY OK (%s) nft=%s pending=%d total_sent=%d",
+                result, DELIVERY_STATS["last_slug"] or (item or {}).get("kind"),
+                len(state.data["pending"]), DELIVERY_STATS["sent"],
+            )
+            backoff = 2.0
+            # A gentle send rate avoids Telegram bot flood protection.
+            await asyncio.sleep(1.5)
+
+        except asyncio.CancelledError:
+            raise
+        except FloodWaitError as exc:
+            delay = max(3, int(exc.seconds) + 3)
+            DELIVERY_STATS["last_error"] = f"FloodWait {exc.seconds} sec"
+            DELIVERY_STATS["last_error_at"] = now_utc()
+            DELIVERY_STATS["retries"] += 1
+            DELIVERY_STATS["next_delay_sec"] = delay
+            log.warning("DELIVERY FloodWait=%ss; saved %d pending for retry",
+                        exc.seconds, len(state.data["pending"]))
+            await asyncio.sleep(delay)
+        except Exception as exc:
+            DELIVERY_STATS["errors"] += 1
+            DELIVERY_STATS["retries"] += 1
+            DELIVERY_STATS["last_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+            DELIVERY_STATS["last_error_at"] = now_utc()
+            DELIVERY_STATS["next_delay_sec"] = int(backoff)
+            log.exception(
+                "DELIVERY FAILED, will retry in %.1fs; queued=%d",
+                backoff, len(state.data["pending"]),
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 120.0)
 
 
 # These counters are intentionally visible via /status and /diagnose.
@@ -483,6 +557,7 @@ async def run() -> None:
             await event.respond(
                 "📡 <b>Gift Upgrade Radar</b>\n\n"
                 "/status — состояние\n"
+                "/delivery — очередь и ошибки доставки\n"
                 "/diagnose — диагностика NFT\n"
                 "/all on — оповещать обо всех улучшенных NFT\n"
                 "/owner PlushPepe-123 — ссылка на профиль владельца\n"
@@ -513,6 +588,8 @@ async def run() -> None:
                 f"коллекций с baseline: {len(state.data['collections'])}\n"
                 f"🔥 Редкая модель: ≤ {MAX_MODEL_RARITY_PCT:g}% или tier epic/legendary\n"
                 f"📬 В очереди: {len(state.data['pending'])}\n"
+                f"📤 Отправлено с запуска: {DELIVERY_STATS['sent']}\n"
+                f"⚠️ Ошибка доставки: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}\n"
                 f"🔔 Все новые NFT: {'включено' if all_nft_notifications() else 'только редкие'}\n"
                 f"🆕 Увидено новых NFT: {NFT_HEALTH['total_new_nfts']} (редких: {NFT_HEALTH['total_rare_nfts']})\n"
                 f"🕒 Последняя проверка каталога: {state.data['last_check'] or 'ещё не было'} (UTC)\n"
@@ -523,6 +600,22 @@ async def run() -> None:
                 f"⚠️ Ошибок: {NFT_HEALTH['errors']}\n"
                 f"🕒 Последний успешный NFT-запрос: {NFT_HEALTH['last_success'] or 'ни одного'}\n"
                 f"❗ Ошибка NFT: {html.escape(NFT_HEALTH['last_error'] or 'нет')}",
+                parse_mode="html",
+            )
+        elif cmd == "/delivery":
+            pending = state.data.get("pending") or []
+            first = pending[0] if pending else None
+            await event.respond(
+                "📤 <b>Доставка уведомлений</b>\n"
+                f"📬 В очереди: {len(pending)}\n"
+                f"✅ Отправлено с запуска: {DELIVERY_STATS['sent']}\n"
+                f"📝 Упрощённым текстом: {DELIVERY_STATS['plain']}\n"
+                f"🔁 Повторов: {DELIVERY_STATS['retries']}\n"
+                f"🕒 Последняя отправка: {DELIVERY_STATS['last_sent'] or 'нет'}\n"
+                f"📌 Первое событие: {html.escape((first or {}).get('slug') or (first or {}).get('kind') or 'нет')}\n"
+                f"⚠️ Ошибка: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}\n"
+                f"⏱ Задержка повторной попытки: {DELIVERY_STATS['next_delay_sec']} сек\n"
+                f"🔔 Уведомления: {'на паузе' if state.data['paused'] else 'включены'}",
                 parse_mode="html",
             )
         elif cmd == "/diagnose":
@@ -804,8 +897,10 @@ async def run() -> None:
                 "Бот привязан к ID %s; одноразовый ключ: %s",
                 state.owner_id, state.activation_status()
             )
-        tasks = [asyncio.create_task(monitor(user, bot)),
+        tasks = [asyncio.create_task(delivery_worker(bot)),
+                 asyncio.create_task(monitor(user, bot)),
                  asyncio.create_task(monitor_deals(user, bot))]
+        DELIVERY_WAKE.set()  # Flush persisted unsent NFT alerts on startup.
         if TRACK_RARE_NFTS:
             tasks.append(asyncio.create_task(monitor_rare_nfts(user, bot)))
         await asyncio.gather(*tasks)
