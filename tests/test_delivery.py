@@ -11,6 +11,14 @@ class InvalidButtonError(Exception):
     pass
 
 
+class ButtonUrlInvalidError(Exception):
+    pass
+
+
+class MessageEntityInvalidError(Exception):
+    pass
+
+
 class DeliveryQueueTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -136,6 +144,25 @@ class DeliveryQueueTests(unittest.IsolatedAsyncioTestCase):
         await dispatch_next(self.state, sender, sender)
         await dispatch_next(self.state, sender, sender)
         self.assertEqual(sent, ["PlushPepe-1", "PlushPepe-2"])
+
+    async def test_telethon_camelcase_button_error_falls_back(self):
+        self.add_nft(333)
+        delivered = []
+
+        async def rich(item):
+            raise ButtonUrlInvalidError("invalid URL")
+
+        async def plain(item):
+            delivered.append(fallback_text(item))
+
+        result, item = await dispatch_next(self.state, rich, plain)
+        self.assertEqual(result, "plain")
+        self.assertEqual(item["slug"], "PlushPepe-333")
+        self.assertEqual(len(delivered), 1)
+        self.assertFalse(self.state.data["pending"])
+
+    def test_telethon_camelcase_entity_error_is_detected(self):
+        self.assertTrue(is_bad_markup(MessageEntityInvalidError("bad entities")))
 
     def test_transient_errors_are_not_treated_as_markup(self):
         self.assertFalse(is_bad_markup(ConnectionError("Connection closed")))
