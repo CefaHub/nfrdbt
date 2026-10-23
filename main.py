@@ -23,6 +23,7 @@ from gift_host import hosted_profile
 from deal_watch import valid_gift_slug, deal_snapshot, deal_opportunities, deal_details
 from delivery import dispatch_next, fallback_text
 from scan_pacing import remaining_pause
+from recipient_filter import recipient_from_history, filter_pending
 from see_live import HEALTH as LIVE_HEALTH, run_stream
 from live_market import record_sale, estimate_listing, live_nft_notification, deal_notification
 
@@ -77,7 +78,7 @@ state = RadarState(DATA_DIR / "state.json")
 LIVE_COUNTERS = {
     "new_notified": 0, "new_skipped_limit": 0, "deals_notified": 0,
     "sales_recorded": 0, "last_new": None, "minute_bucket": None,
-    "minute_count": 0, "last_listing": None,
+    "minute_count": 0, "last_listing": None, "filtered_no_recipient": 0,
 }
 DELIVERY_WAKE = asyncio.Event()
 DELIVERY_STATS = {
@@ -279,6 +280,9 @@ async def delivery_worker(bot: TelegramClient) -> None:
     backoff = 2.0
     while True:
         try:
+            removed = filter_pending(state)
+            if removed:
+                log.info("Recipient-only filter discarded %d older queued alerts", removed)
             if not state.owner_id or state.data.get("paused") or not state.data["pending"]:
                 DELIVERY_WAKE.clear()
                 try:
@@ -357,6 +361,7 @@ NFT_HEALTH = {
     "sweep_progress": 0,
     "last_batch_duration": None,
     "last_batch_successful": 0,
+    "filtered_no_recipient": 0,
 }
 # Avoid retrying an invalid slug every minute. This cache is process-local.
 UNRESOLVED_UNTIL: dict[str, float] = {}
@@ -502,46 +507,51 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                             collectible = details.gift
                             # Crafting has its own minting process; the radar tracks upgrades.
                             if not getattr(collectible, "crafted", False):
-                                attrs = extract_attributes(collectible)
-                                rare = is_rare_model(attrs, MAX_MODEL_RARITY_PCT)
-                                event = make_event(collectible, attrs, now_utc(), rare=rare)
-                                # Owner lookup must never stall mint scanning.
-                                # Parallel public-link lookups, bounded by one
-                                # timeout. Historical people are never treated
-                                # as the current gift holder.
-                                try:
-                                    lookup = await asyncio.wait_for(
-                                        asyncio.gather(
-                                            resolve_owner_contact(collectible, details, user),
-                                            resolve_original_participants(collectible, details, user),
-                                            hosted_profile(collectible, details, user),
-                                        ),
-                                        timeout=3.5,
+                                initial_history = original_participants(collectible, details)
+                                if recipient_from_history(initial_history):
+                                    attrs = extract_attributes(collectible)
+                                    rare = is_rare_model(attrs, MAX_MODEL_RARITY_PCT)
+                                    event = make_event(collectible, attrs, now_utc(), rare=rare)
+                                    # Owner lookup must never stall mint scanning.
+                                    # Parallel public-link lookups, bounded by one
+                                    # timeout. Historical people are never treated
+                                    # as the current gift holder.
+                                    try:
+                                        lookup = await asyncio.wait_for(
+                                            asyncio.gather(
+                                                resolve_owner_contact(collectible, details, user),
+                                                resolve_original_participants(collectible, details, user),
+                                                hosted_profile(collectible, details, user),
+                                            ),
+                                            timeout=3.5,
+                                        )
+                                        contact, history, hosted = lookup
+                                    except Exception as exc:
+                                        log.debug("Public contact lookup delayed for %s: %s", collectible.slug, exc)
+                                        contact = owner_contact(collectible, details)
+                                        history = original_participants(collectible, details)
+                                        hosted = None
+                                    event.update(contact)
+                                    event["original_participants"] = history
+                                    if hosted:
+                                        event["hosted_profile"] = hosted
+                                    NFT_HEALTH["total_new_nfts"] += 1
+                                    NFT_HEALTH["last_nft"] = str(collectible.slug)
+                                    if rare:
+                                        NFT_HEALTH["total_rare_nfts"] += 1
+                                    if rare or all_nft_notifications():
+                                        if state.record_nft_once(event):
+                                            NFT_HEALTH["notified_nfts"] += 1
+                                            NFT_HEALTH["discovered"] += 1
+                                            NFT_HEALTH["last_found"] = now_utc()
+                                    log.info(
+                                        "NFT UPGRADE: %s | model=%s | rarity=%s | rare=%s | queued=%s",
+                                        collectible.slug, event["model"], event["model_rarity"],
+                                        rare, rare or all_nft_notifications(),
                                     )
-                                    contact, history, hosted = lookup
-                                except Exception as exc:
-                                    log.debug("Public contact lookup delayed for %s: %s", collectible.slug, exc)
-                                    contact = owner_contact(collectible, details)
-                                    history = original_participants(collectible, details)
-                                    hosted = None
-                                event.update(contact)
-                                event["original_participants"] = history
-                                if hosted:
-                                    event["hosted_profile"] = hosted
-                                NFT_HEALTH["total_new_nfts"] += 1
-                                NFT_HEALTH["last_nft"] = str(collectible.slug)
-                                if rare:
-                                    NFT_HEALTH["total_rare_nfts"] += 1
-                                if rare or all_nft_notifications():
-                                    if state.record_nft_once(event):
-                                        NFT_HEALTH["notified_nfts"] += 1
-                                        NFT_HEALTH["discovered"] += 1
-                                        NFT_HEALTH["last_found"] = now_utc()
-                                log.info(
-                                    "NFT UPGRADE: %s | model=%s | rarity=%s | rare=%s | queued=%s",
-                                    collectible.slug, event["model"], event["model_rarity"],
-                                    rare, rare or all_nft_notifications(),
-                                )
+                                else:
+                                    NFT_HEALTH["filtered_no_recipient"] += 1
+                                    log.debug("NFT skipped (no original recipient): %s", collectible.slug)
                             state.set_collection_issued(resolved, number)
                             await deliver_pending(bot)
                     except FloodWaitError:
@@ -613,7 +623,7 @@ async def monitor(user: TelegramClient, bot: TelegramClient) -> None:
 
 
 
-async def live_market_event(event: dict) -> None:
+async def live_market_event(event: dict, user: TelegramClient | None = None) -> None:
     """No paid see.tg REST calls, wallet actions or automated purchases."""
     if LIVE_COLLECTIONS and event["collection"] not in LIVE_COLLECTIONS:
         return
@@ -631,13 +641,45 @@ async def live_market_event(event: dict) -> None:
         if LIVE_COUNTERS["minute_count"] >= LIVE_MAX_NEW_PER_MINUTE:
             LIVE_COUNTERS["new_skipped_limit"] += 1
             return
-        alert = live_nft_notification(event)
-        if state.record_nft_once(alert):
-            LIVE_COUNTERS["minute_count"] += 1
-            LIVE_COUNTERS["new_notified"] += 1
-            LIVE_COUNTERS["last_new"] = now_utc()
-            log.info("LIVE NEW %s queued=%d", event["slug"], len(state.data["pending"]))
-            await deliver_pending(None)
+        if user is None:
+            log.debug("Live %s ignored: MTProto session unavailable for recipient verification", event["slug"])
+            return
+        try:
+            details = await user(
+                functions.payments.GetUniqueStarGiftRequest(slug=event["slug"])
+            )
+            collectible = details.gift
+            if getattr(collectible, "crafted", False) or str(collectible.slug).lower() != event["slug"].lower():
+                return
+            initial_history = original_participants(collectible, details)
+            if not recipient_from_history(initial_history):
+                LIVE_COUNTERS["filtered_no_recipient"] += 1
+                return
+            # The historical recipient is required before queuing an alert.
+            try:
+                history = await asyncio.wait_for(
+                    resolve_original_participants(collectible, details, user),
+                    timeout=2.0,
+                )
+                if not recipient_from_history(history):
+                    history = initial_history
+            except Exception:
+                history = initial_history
+            alert = live_nft_notification(event)
+            alert["original_participants"] = history
+            alert.update(owner_contact(collectible, details))
+            if state.record_nft_once(alert):
+                LIVE_COUNTERS["minute_count"] += 1
+                LIVE_COUNTERS["new_notified"] += 1
+                LIVE_COUNTERS["last_new"] = now_utc()
+                log.info("LIVE GIFT WITH RECIPIENT %s queued=%d",
+                         event["slug"], len(state.data["pending"]))
+                await deliver_pending(None)
+        except FloodWaitError as exc:
+            log.warning("Live recipient check rate-limited for %s: %ds", event["slug"], exc.seconds)
+        except Exception as exc:
+            log.debug("Live recipient verification failed for %s: %s",
+                      event["slug"], type(exc).__name__)
         return
 
     if event["type"] in {"listing", "price"}:
@@ -646,27 +688,9 @@ async def live_market_event(event: dict) -> None:
         while len(listings) > 300:
             del listings[next(iter(listings))]
         LIVE_COUNTERS["last_listing"] = now_utc()
-        if not LIVE_NOTIFY_BARGAINS:
-            return
-        estimate = estimate_listing(
-            state.data, event, threshold=LIVE_BARGAIN_RATIO
-        )
-        alert = deal_notification(event, estimate)
-        if not alert:
-            return
-        key = ":".join((
-            event["slug"], event["type"], event.get("at") or "",
-            (event.get("price") or {}).get("display") or "",
-        ))
-        seen = state.data.setdefault("live_seen_deals", [])
-        if key in seen:
-            return
-        seen.append(key)
-        del seen[:-1000]
-        state.record_rare_nft(alert)
-        LIVE_COUNTERS["deals_notified"] += 1
-        log.info("LIVE PRICE SIGNAL %s ratio=%.2f", event["slug"], estimate["ratio"])
-        await deliver_pending(None)
+        # Price history remains available to /value; no automatic
+        # listings or deal messages in recipient-only mode.
+        return
 
 
 async def fetch_deal_snapshot(user: TelegramClient, slug: str) -> dict:
@@ -811,6 +835,7 @@ async def run() -> None:
                 f"коллекций с baseline: {len(state.data['collections'])}\n"
                 f"🔥 Редкая модель: ≤ {MAX_MODEL_RARITY_PCT:g}% или tier epic/legendary\n"
                 f"📬 В очереди: {len(state.data['pending'])}\n"
+                f"📥 Только NFT с получателем; отфильтровано: {NFT_HEALTH['filtered_no_recipient']}\n"
                 f"📤 Отправлено с запуска: {DELIVERY_STATS['sent']}\n"
                 f"⚠️ Ошибка доставки: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}\n"
                 f"🔔 Все новые NFT: {'включено' if all_nft_notifications() else 'только редкие'}\n"
@@ -931,6 +956,7 @@ async def run() -> None:
                 f"Полных обходов: {NFT_HEALTH['sweeps_completed']}; цель: {NFT_SWEEP_SECONDS} сек\n"
                 f"Известных коллекций: {len(state.data['collections'])}\n"
                 f"Новых NFT просмотрено: {NFT_HEALTH['total_new_nfts']}; редких: {NFT_HEALTH['total_rare_nfts']}\n"
+                f"Без первого получателя: {NFT_HEALTH['filtered_no_recipient']}\n"
                 f"Оповещений поставлено: {NFT_HEALTH['notified_nfts']}; backlog: {NFT_HEALTH['backlog']}\n"
                 f"Уведомления: {'все NFT' if all_nft_notifications() else 'только редкие'}\n"
                 f"Последняя ошибка: {html.escape(NFT_HEALTH['last_error'] or 'нет')}\n"
@@ -1285,7 +1311,8 @@ async def run() -> None:
                  asyncio.create_task(monitor_deals(user, bot))]
         if LIVE_ENABLED:
             tasks.append(asyncio.create_task(
-                run_stream(live_market_event, LIVE_API_TOKEN, LIVE_COLLECTIONS or None)
+                run_stream(lambda event: live_market_event(event, user),
+                           LIVE_API_TOKEN, LIVE_COLLECTIONS or None)
             ))
         DELIVERY_WAKE.set()  # Flush persisted unsent NFT alerts on startup.
         if TRACK_RARE_NFTS:
