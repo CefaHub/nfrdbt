@@ -23,6 +23,8 @@ from gift_host import hosted_profile
 from deal_watch import valid_gift_slug, deal_snapshot, deal_opportunities, deal_details
 from delivery import dispatch_next, fallback_text
 from scan_pacing import remaining_pause
+from see_live import HEALTH as LIVE_HEALTH, run_stream
+from live_market import record_sale, estimate_listing, live_nft_notification, deal_notification
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -48,6 +50,14 @@ INTERVAL = max(15, int(os.getenv("CHECK_INTERVAL", "20")))
 NOTIFY_PRICE_CHANGES = os.getenv("NOTIFY_PRICE_CHANGES", "false").lower() in {"true", "yes", "1"}
 TRACK_RARE_NFTS = os.getenv("TRACK_RARE_NFTS", "true").lower() in {"true", "yes", "1"}
 NOTIFY_ALL_NFTS = os.getenv("NOTIFY_ALL_NFTS", "true").lower() in {"true", "yes", "1"}
+LIVE_ENABLED = os.getenv("LIVE_ENABLED", "true").lower() in {"true", "yes", "1"}
+LIVE_API_TOKEN = os.getenv("SEE_TG_API_TOKEN", "").strip()
+LIVE_NOTIFY_NEW = os.getenv("LIVE_NOTIFY_NEW", "true").lower() in {"true", "yes", "1"}
+LIVE_NOTIFY_BARGAINS = os.getenv("LIVE_NOTIFY_BARGAINS", "true").lower() in {"true", "yes", "1"}
+LIVE_BARGAIN_RATIO = min(0.95, max(0.10, float(os.getenv("LIVE_BARGAIN_RATIO", "0.75"))))
+LIVE_MAX_NEW_PER_MINUTE = max(0, min(60, int(os.getenv("LIVE_MAX_NEW_PER_MINUTE", "15"))))
+LIVE_COLLECTIONS = [x.strip() for x in os.getenv("LIVE_COLLECTIONS", "").split(",")
+                    if x.strip() and x.strip().isalnum()]
 # NFT_SCAN_INTERVAL now targets one complete sweep, not one batch.
 NFT_SWEEP_SECONDS = max(60, int(
     os.getenv("NFT_SWEEP_SECONDS") or os.getenv("NFT_SCAN_INTERVAL", "60")
@@ -64,6 +74,11 @@ GIFT_COLLECTIONS = [x.strip() for x in os.getenv("GIFT_COLLECTIONS", "").split("
 DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if os.getenv("BOT_ID") else "data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 state = RadarState(DATA_DIR / "state.json")
+LIVE_COUNTERS = {
+    "new_notified": 0, "new_skipped_limit": 0, "deals_notified": 0,
+    "sales_recorded": 0, "last_new": None, "minute_bucket": None,
+    "minute_count": 0, "last_listing": None,
+}
 DELIVERY_WAKE = asyncio.Event()
 DELIVERY_STATS = {
     "sent": 0,
@@ -108,6 +123,8 @@ def origin_lines(item: dict) -> str:
 
 
 def message_for_gift(item: dict) -> str:
+    if item.get("kind") == "market_deal":
+        return market_deal_message(item)
     if item.get("kind") == "delivery_test":
         return ("✅ <b>ПРОВЕРКА ОЧЕРЕДИ УСПЕШНА</b>\n"
                 "Сообщение прошло через независимый отправитель NFT Radar, "
@@ -190,7 +207,7 @@ def message_for_gift(item: dict) -> str:
 
 
 def nft_buttons(item: dict):
-    if item.get("kind") not in {"rare_nft", "new_nft"}:
+    if item.get("kind") not in {"rare_nft", "new_nft", "market_deal"}:
         return None
     buttons = [
         [Button.url("🎁 Открыть NFT / оффер", f"https://t.me/nft/{item['slug']}")]
@@ -203,6 +220,8 @@ def nft_buttons(item: dict):
             buttons.append([Button.url("✉️ Открыть чат владельца", item["owner_url"])])
         elif item.get("owner_profile_url"):
             buttons.append([Button.url("👤 Открыть профиль по ID", item["owner_profile_url"])])
+    if item.get("kind") == "market_deal" and item.get("seller_url"):
+        buttons.append([Button.url("✉️ Публичный продавец", item["seller_url"])])
     buttons.extend(original_buttons(item.get("original_participants") or [], Button.url))
     host = item.get("hosted_profile")
     if isinstance(host, dict) and host.get("url"):
@@ -214,7 +233,7 @@ async def send_alert(bot: TelegramClient, chat_id: int, text: str, item: dict | 
     item = item or {}
     # Telegram's webpage preview requires both an actual URL in message
     # text and link_preview=True. A URL button alone produces no preview.
-    show_gift_preview = item.get("kind") in {"new_nft", "rare_nft"}
+    show_gift_preview = item.get("kind") in {"new_nft", "rare_nft", "market_deal"}
     await bot.send_message(
         chat_id, text, parse_mode="html", link_preview=show_gift_preview,
         buttons=nft_buttons(item),
@@ -250,7 +269,7 @@ async def delivery_worker(bot: TelegramClient) -> None:
                 await bot.send_message(
                     state.owner_id,
                     fallback_text(item),
-                    link_preview=item.get("kind") in {"new_nft", "rare_nft"},
+                    link_preview=item.get("kind") in {"new_nft", "rare_nft", "market_deal"},
                 )
 
             result, item = await asyncio.wait_for(
@@ -489,10 +508,10 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                                 if rare:
                                     NFT_HEALTH["total_rare_nfts"] += 1
                                 if rare or all_nft_notifications():
-                                    state.record_rare_nft(event)
-                                    NFT_HEALTH["notified_nfts"] += 1
-                                    NFT_HEALTH["discovered"] += 1
-                                    NFT_HEALTH["last_found"] = now_utc()
+                                    if state.record_nft_once(event):
+                                        NFT_HEALTH["notified_nfts"] += 1
+                                        NFT_HEALTH["discovered"] += 1
+                                        NFT_HEALTH["last_found"] = now_utc()
                                 log.info(
                                     "NFT UPGRADE: %s | model=%s | rarity=%s | rare=%s | queued=%s",
                                     collectible.slug, event["model"], event["model_rarity"],
