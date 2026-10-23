@@ -27,6 +27,26 @@ class StarGiftAttributeRarityLegendary:
 
 
 class MintTests(unittest.TestCase):
+    def test_new_nonrare_nft_event_is_not_marked_rare(self):
+        collectible = SimpleNamespace(
+            gift_id=123, title="Plush Pepe", slug="PlushPepe-201", num=201,
+            attributes=[StarGiftAttributeModel("Common", 150)],
+        )
+        attrs = extract_attributes(collectible)
+        self.assertFalse(is_rare_model(attrs, 1.0))
+        event = make_event(collectible, attrs, "2026-10-24T00:00:00+00:00", rare=False)
+        self.assertEqual(event["kind"], "new_nft")
+        self.assertEqual(event["model_rarity"], "15%")
+
+    def test_rare_nft_keeps_existing_message_type(self):
+        collectible = SimpleNamespace(
+            gift_id=123, title="Plush Pepe", slug="PlushPepe-202", num=202,
+            attributes=[StarGiftAttributeModel("Epic", 5)],
+        )
+        attrs = extract_attributes(collectible)
+        event = make_event(collectible, attrs, "2026-10-24T00:00:00+00:00")
+        self.assertEqual(event["kind"], "rare_nft")
+
     def test_slug(self):
         self.assertEqual(collection_slug("Plush Pepe"), "PlushPepe")
 
