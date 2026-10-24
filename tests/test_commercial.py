@@ -40,6 +40,108 @@ class SalesLinksTests(unittest.TestCase):
         self.assertEqual(self.store.redeem(code, 200), "existing")
         self.assertTrue(self.store.is_subscribed(200))
 
+    def test_day_pass_is_24_hours_from_activation_not_from_link_generation(self):
+        with patch("commercial.time.time", return_value=100_000):
+            link = self.store.create_links(1, duration_days=1)[0]
+            self.assertEqual(self.store.stats()["trial_links"], 1)
+        with patch("commercial.time.time", return_value=200_000):
+            self.assertEqual(self.store.redeem(link, 200), "activated")
+            self.assertEqual(self.store.license_info(200)["expires_at"], 286_400)
+            self.assertTrue(self.store.is_subscribed(200))
+        with patch("commercial.time.time", return_value=286_399):
+            self.assertTrue(self.store.is_subscribed(200))
+        with patch("commercial.time.time", return_value=286_400):
+            self.assertFalse(self.store.is_subscribed(200))
+            self.assertTrue(self.store.license_info(200)["expired"])
+            self.assertFalse(self.store.reactivate(200))
+            self.assertEqual(self.store.stats()["trial_expired"], 1)
+
+    def test_expired_buyer_cannot_receive_notifications_or_reactivate_without_new_link(self):
+        with patch("commercial.time.time", return_value=1_000_000):
+            self.store.redeem(self.store.create_links(1, duration_days=1)[0], 200)
+            self.store.publish({"event_id": "e1", "kind": "new_nft", "slug": "G-1"})
+            self.assertEqual(self.store.delivery_backlog(), 2)
+        with patch("commercial.time.time", return_value=1_086_400):
+            self.assertFalse(self.store.is_subscribed(200))
+            self.assertEqual(self.store.delivery_backlog(), 1)
+            self.assertEqual(self.store.next_delivery()[0], ADMIN_ID)
+            self.assertFalse(self.store.reactivate(200))
+            self.store.ack(ADMIN_ID, self.store.next_delivery()[1])
+            self.assertIsNone(self.store.next_delivery())
+
+    def test_day_renewal_and_lifetime_upgrade_never_downgrade(self):
+        with patch("commercial.time.time", return_value=5_000):
+            self.assertEqual(self.store.redeem(
+                self.store.create_links(1, duration_days=1)[0], 200
+            ), "activated")
+            self.assertEqual(self.store.license_info(200)["expires_at"], 91_400)
+        with patch("commercial.time.time", return_value=6_000):
+            self.assertEqual(self.store.redeem(
+                self.store.create_links(1, duration_days=1)[0], 200
+            ), "extended")
+            self.assertEqual(self.store.license_info(200)["expires_at"], 177_800)
+            self.assertEqual(self.store.redeem(
+                self.store.create_links(1)[0], 200
+            ), "upgraded")
+            self.assertIsNone(self.store.license_info(200)["expires_at"])
+            daily = self.store.create_links(1, duration_days=1)[0]
+            self.assertEqual(self.store.redeem(daily, 200), "existing")
+            self.assertEqual(self.store.stats()["trial_links"], 1)
+            self.assertEqual(self.store.redeem(daily, 201), "activated")
+            self.assertIsNone(self.store.license_info(200)["expires_at"])
+
+    def test_expired_pass_renewal_skips_old_alerts(self):
+        with patch("commercial.time.time", return_value=1_000):
+            self.store.redeem(self.store.create_links(1, duration_days=1)[0], 200)
+        with patch("commercial.time.time", return_value=88_000):
+            self.store.publish({"event_id": "missed", "kind": "new_nft", "slug": "G-1"})
+            self.assertEqual(self.store.redeem(
+                self.store.create_links(1, duration_days=1)[0], 200
+            ), "extended")
+            # Customer may only see NEW alerts after renewing an expired pass.
+            work = self.store.next_delivery()
+            self.assertEqual(work[0], ADMIN_ID)
+            self.store.ack(ADMIN_ID, work[1])
+            self.assertIsNone(self.store.next_delivery())
+
+    def test_existing_database_migrates_without_expiring_lifetime(self):
+        import sqlite3
+        legacy_path = Path(self.tmp.name) / "before-update.sqlite3"
+        with sqlite3.connect(legacy_path) as conn:
+            conn.executescript("""
+                CREATE TABLE users (
+                    chat_id INTEGER PRIMARY KEY, active INTEGER NOT NULL DEFAULT 1,
+                    cursor INTEGER NOT NULL DEFAULT 0,
+                    retry_after INTEGER NOT NULL DEFAULT 0,
+                    failures INTEGER NOT NULL DEFAULT 0,
+                    joined_at INTEGER NOT NULL
+                );
+                CREATE TABLE invites (
+                    code_hash TEXT PRIMARY KEY, issued_at INTEGER NOT NULL,
+                    redeemed_by INTEGER, redeemed_at INTEGER
+                );
+                INSERT INTO users(chat_id, active, cursor, joined_at)
+                    VALUES(123,1,0,1000);
+            """)
+        recovered = CommercialStore(legacy_path)
+        try:
+            self.assertTrue(recovered.is_subscribed(123))
+            self.assertIsNone(recovered.license_info(123)["expires_at"])
+            self.assertTrue(recovered.is_subscribed(ADMIN_ID))
+            self.assertEqual(recovered.stats()["lifetime_links"], 0)
+            recovered.create_links(1, duration_days=1)
+            self.assertEqual(recovered.stats()["trial_links"], 1)
+        finally:
+            recovered.conn.close()
+
+    def test_invalid_duration_or_invalid_link_no_access(self):
+        with self.assertRaises(ValueError):
+            self.store.create_links(1, duration_days=2)
+        with self.assertRaises(ValueError):
+            self.store.create_links(1, duration_days=0)
+        self.assertEqual(self.store.redeem("bogus", 200), "invalid")
+        self.assertFalse(self.store.is_subscribed(200))
+
     def test_broadcast_does_not_copy_nft_for_every_subscriber(self):
         codes = self.store.create_links(3)
         for uid, code in zip((200, 201, 202), codes):
