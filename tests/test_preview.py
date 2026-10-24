@@ -113,6 +113,19 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(buttons), 1)
         self.assertEqual(buttons[0][0].text, "Открыть подарок")
 
+    def test_private_recipient_id_without_url_uses_bot_api_profile_button(self):
+        import main
+        gift = item()
+        gift["original_participants"][-1].update({
+            "url": None, "public_username": None, "label": "Без юза",
+        })
+        self.assertEqual(main._private_profile_user_id(gift), 72)
+        self.assertEqual(
+            main._private_profile_payload(42, message_for_gift(gift), gift)
+            ["reply_markup"]["inline_keyboard"][1][0]["url"],
+            "tg://user?id=72"
+        )
+
     def test_private_user_profile_request_has_both_buttons(self):
         import main
         gift = item()
