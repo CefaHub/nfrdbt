@@ -120,8 +120,9 @@ class RadarState:
     def record_rare_nft(self, event: dict[str, Any]) -> None:
         event = dict(event, event_id=uuid4().hex)
         self.data["history"] = (self.data["history"] + [event])[-50:]
-        if not self.data["paused"]:
-            self.data["pending"] = self.data["pending"] + [event]
+        # Pause only stops sending; keep every discovered NFT on disk
+        # so /resume or /pushall can still deliver it later.
+        self.data["pending"] = self.data["pending"] + [event]
         self.save()
 
     def record_nft_once(self, event: dict[str, Any]) -> bool:
