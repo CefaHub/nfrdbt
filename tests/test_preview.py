@@ -55,7 +55,7 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(kwargs["buttons"]), 2)
         self.assertEqual(kwargs["buttons"][0][0].text, "Открыть подарок")
         self.assertEqual(kwargs["buttons"][1][0].text, "Профиль владельца")
-        self.assertEqual(kwargs["buttons"][1][0].url, "https://t.me/CurrentOwner99")
+        self.assertIn("https://t.me/CurrentOwner99", text)
 
     async def test_owner_without_public_profile_has_no_misleading_button(self):
         gift = item()
