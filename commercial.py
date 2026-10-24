@@ -68,6 +68,23 @@ class CommercialStore:
                     self.conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN {column} INTEGER"
                     )
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS star_orders (
+                payload TEXT PRIMARY KEY,
+                buyer_id INTEGER NOT NULL,
+                plan TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS star_payments (
+                charge_id TEXT PRIMARY KEY,
+                invoice_payload TEXT NOT NULL,
+                buyer_id INTEGER NOT NULL,
+                plan TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                paid_at INTEGER NOT NULL
+            );
+        """)
         self._add_admin()
 
     def _max_seq(self) -> int:
@@ -217,6 +234,112 @@ class CommercialStore:
                 "WHERE chat_id=?", (chat_id,),
             )
         return True
+
+    def create_star_order(self, buyer_id: int, plan: str,
+                          amount: int) -> str:
+        """Issue an order token for exactly one buyer and a fixed XTR amount."""
+        if buyer_id <= 0 or plan not in {"1d", "lifetime"} or amount <= 0:
+            raise ValueError("Invalid Telegram Stars order")
+        token = "star_" + secrets.token_urlsafe(24)
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO star_orders(payload,buyer_id,plan,amount,created_at) "
+                "VALUES(?,?,?,?,?)",
+                (token, buyer_id, plan, amount, int(time.time())),
+            )
+        return token
+
+    def verify_star_order(self, payload: str, buyer_id: int,
+                          amount: int) -> bool:
+        """Only accept exact XTR price/user on a recent, unpaid invoice."""
+        if buyer_id <= 0 or amount <= 0 or not isinstance(payload, str):
+            return False
+        row = self.conn.execute(
+            "SELECT buyer_id,amount,created_at,plan FROM star_orders "
+            "WHERE payload=?", (payload,),
+        ).fetchone()
+        if row is None:
+            return False
+        if (int(row[0]) != buyer_id or int(row[1]) != amount
+                or not (0 <= int(time.time()) - int(row[2]) <= 3600)):
+            return False
+        already_paid = self.conn.execute(
+            "SELECT 1 FROM star_payments WHERE invoice_payload=?",
+            (payload,),
+        ).fetchone()
+        return already_paid is None
+
+    def fulfill_star_payment(self, charge_id: str, payload: str,
+                             buyer_id: int, amount: int) -> str:
+        """Idempotently apply only verified successful_payment updates.
+
+        Currency XTR must be checked by the caller. A unique charge and
+        invoice payload prevent duplicate grants on repeated Bot API updates.
+        """
+        if not charge_id or buyer_id <= 0:
+            return "invalid"
+        now = int(time.time())
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            already = self.conn.execute(
+                "SELECT 1 FROM star_payments WHERE charge_id=? "
+                "OR invoice_payload=? LIMIT 1",
+                (charge_id, payload),
+            ).fetchone()
+            if already:
+                self.conn.commit()
+                return "already"
+            row = self.conn.execute(
+                "SELECT buyer_id,plan,amount,created_at FROM star_orders "
+                "WHERE payload=?", (payload,),
+            ).fetchone()
+            # A completed invoice can arrive late from Telegram; unlike
+            # pre-checkout, don't reject it just because the hour passed.
+            if row is None or int(row[0]) != buyer_id or int(row[2]) != amount:
+                self.conn.rollback()
+                return "invalid"
+            plan = row[1]
+            current = self.conn.execute(
+                "SELECT expires_at FROM users WHERE chat_id=?", (buyer_id,),
+            ).fetchone()
+            if current is None:
+                expiry = now + 86400 if plan == "1d" else None
+                self.conn.execute(
+                    "INSERT INTO users(chat_id,active,cursor,joined_at,expires_at) "
+                    "VALUES(?,1,?,?,?)",
+                    (buyer_id, self._max_seq(), now, expiry),
+                )
+            elif current[0] is not None:
+                before = int(current[0])
+                new_expiry = (max(before, now) + 86400
+                              if plan == "1d" else None)
+                cursor = self._max_seq() if before <= now else None
+                if cursor is not None:
+                    self.conn.execute(
+                        "UPDATE users SET cursor=? WHERE chat_id=?",
+                        (cursor, buyer_id),
+                    )
+                self.conn.execute(
+                    "UPDATE users SET active=1,expires_at=?,retry_after=0,"
+                    "failures=0 WHERE chat_id=?",
+                    (new_expiry, buyer_id),
+                )
+            else:
+                # Never turn existing permanent access into a timed pass.
+                self.conn.execute(
+                    "UPDATE users SET active=1,retry_after=0,failures=0 "
+                    "WHERE chat_id=?", (buyer_id,),
+                )
+            self.conn.execute(
+                "INSERT INTO star_payments(charge_id,invoice_payload,buyer_id,"
+                "plan,amount,paid_at) VALUES(?,?,?,?,?,?)",
+                (charge_id, payload, buyer_id, plan, amount, now),
+            )
+            self.conn.commit()
+            return "activated"
+        except BaseException:
+            self.conn.rollback()
+            raise
 
     def deactivate(self, chat_id: int) -> None:
         if chat_id == ADMIN_ID:
