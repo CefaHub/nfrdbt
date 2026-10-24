@@ -54,10 +54,10 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kwargs["link_preview"])
         self.assertEqual(len(kwargs["buttons"]), 2)
         self.assertEqual(kwargs["buttons"][0][0].text, "Открыть подарок")
-        self.assertEqual(kwargs["buttons"][1][0].text, "Профиль владельца")
+        self.assertEqual(kwargs["buttons"][1][0].text, "Профиль")
         self.assertIn("https://t.me/CurrentOwner99", text)
 
-    async def test_owner_without_public_username_keeps_owner_profile_button(self):
+    async def test_profile_button_restored_from_historical_recipient(self):
         gift = item()
         gift["owner"] = {
             "kind": "user", "id": 99,
@@ -69,7 +69,7 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Recipient72", msg)
         buttons = nft_buttons(gift)
         self.assertEqual(len(buttons), 2)
-        self.assertEqual(buttons[1][0].text, "Профиль владельца")
+        self.assertEqual(buttons[1][0].text, "Профиль")
         self.assertEqual(buttons[1][0].text, "Профиль владельца")
         self.assertIn("tg://user?id=99", msg)
 
@@ -77,7 +77,19 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
         gift = item()
         gift.pop("owner")
         self.assertIn("Владелец: Не указан", message_for_gift(gift))
+        self.assertEqual(len(nft_buttons(gift)), 2)
+
+    async def test_profile_button_only_uses_recipient_when_available(self):
+        gift = item(recipient=False)
+        # Do not misroute to owner from the text when original recipient is hidden.
         self.assertEqual(len(nft_buttons(gift)), 1)
+        self.assertIn("Владелец:", message_for_gift(gift))
+
+    async def test_profile_button_recipient_with_id_without_username(self):
+        gift = item()
+        gift["original_participants"][-1]["url"] = "tg://user?id=72"
+        self.assertEqual(nft_buttons(gift)[1][0].text, "Профиль")
+        self.assertIn("CurrentOwner99", message_for_gift(gift))
 
     async def test_rare_and_regular_have_same_simple_layout(self):
         normal = message_for_gift(item())
