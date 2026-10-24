@@ -15,6 +15,10 @@ class PeerChannel:
     def __init__(self, channel_id):
         self.channel_id = channel_id
 
+class PeerChat:
+    def __init__(self, chat_id):
+        self.chat_id = chat_id
+
 
 class StarGiftAttributeOriginalDetails:
     def __init__(self, sender_id, recipient_id):
@@ -71,6 +75,15 @@ class OriginalDetailsTests(unittest.TestCase):
         ))
         self.assertEqual(data[0]["url"], "tg://user?id=10")
         self.assertEqual(data[0]["type"], "user")
+
+    def test_recipient_chat_without_public_username_is_preserved(self):
+        gift = SimpleNamespace(
+            attributes=[StarGiftAttributeOriginalDetails(None, PeerChat(77))]
+        )
+        result = original_participants(gift, SimpleNamespace(users=[], chats=[]))
+        self.assertEqual(result[0]["role"], "recipient")
+        self.assertEqual(result[0]["type"], "chat")
+        self.assertIsNone(result[0]["url"])
 
     def test_malformed_untrusted_peer_does_not_construct_link(self):
         gift = SimpleNamespace(
