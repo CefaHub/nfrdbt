@@ -43,8 +43,9 @@ class FakeGiftUser:
                  if self.has_recipient else [])
         return SimpleNamespace(
             gift=SimpleNamespace(slug=self.slug, attributes=attrs,
-                                 crafted=False, owner_id=None),
-            users=[SimpleNamespace(id=456, username="Recipient456")],
+                                 crafted=False, owner_id=PeerUser(999)),
+            users=[SimpleNamespace(id=456, username="Recipient456"),
+                   SimpleNamespace(id=999, username="RealCurrentOwner")],
             chats=[],
         )
 
@@ -79,6 +80,8 @@ class IntegratedLiveEvents(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sent[0], ADMIN_ID)
             self.assertEqual(sent[2]["slug"], "PlushPepe-234")
             self.assertEqual(sent[2]["original_participants"][0]["role"], "recipient")
+            self.assertEqual(sent[2]["owner"]["label"], "@RealCurrentOwner")
+            self.assertEqual(sent[2]["owner"]["url"], "https://t.me/RealCurrentOwner")
             wake.assert_awaited_once()
         duplicate = main.state.record_nft_once(dict(
             sent[2], kind="rare_nft"
