@@ -21,6 +21,7 @@ from gift_origin import original_participants, resolve_original_participants
 from gift_owner import resolve_current_owner, profile_url
 from delivery import fallback_text, is_bad_markup
 from commercial import CommercialStore, ADMIN_ID
+from stars_payment import StarsMerchant, MERCHANT_USERNAME
 from scan_pacing import remaining_pause
 from recipient_filter import recipient_from_history, filter_pending
 from recipient_recheck import schedule_review, due_reviews, reschedule_review, drop_review
@@ -48,6 +49,9 @@ TEST_API_HASH = "344583e45741c457fe1862106095a5eb"
 API_ID = int(os.getenv("TELEGRAM_API_ID") or os.getenv("API_ID") or TEST_API_ID)
 API_HASH = os.getenv("TELEGRAM_API_HASH") or os.getenv("API_HASH") or TEST_API_HASH
 BOT_TOKEN = required("BOT_TOKEN")
+PAYMENT_BOT_TOKEN = os.getenv("PAYMENT_BOT_TOKEN", "").strip()
+STARS_PRICE_1D = max(0, int(os.getenv("STARS_PRICE_1D", "0")))
+STARS_PRICE_LIFETIME = max(0, int(os.getenv("STARS_PRICE_LIFETIME", "0")))
 SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 INTERVAL = max(15, int(os.getenv("CHECK_INTERVAL", "20")))
 TRACK_RARE_NFTS = os.getenv("TRACK_RARE_NFTS", "true").lower() in {"true", "yes", "1"}
@@ -779,6 +783,18 @@ async def run() -> None:
             return
 
         if sender != ADMIN_ID:
+            if cmd in ("/buy", "/pay", "/payment"):
+                await event.respond(
+                    "NFT Gift Radar — оплата через Telegram Stars ⭐\n"
+                    f"Перейди в @{MERCHANT_USERNAME} и выбери тариф.\n"
+                    "После подтверждения платежа вернись сюда и нажми /start.",
+                    buttons=[Button.url(
+                        "Оплатить звёздами",
+                        f"https://t.me/{MERCHANT_USERNAME}?start=buy"
+                    )],
+                    link_preview=False,
+                )
+                return
             if cmd in ("/start", "/join") and argument:
                 result = store.redeem(argument, sender)
                 info = store.license_info(sender)
@@ -843,7 +859,7 @@ async def run() -> None:
             elif cmd in ("/start", "/status", "/help", "/ping", "/join"):
                 await event.respond(
                     "Это платный NFT-радар. Для активации открой "
-                    "персональную ссылку, полученную после покупки."
+                    "персональную ссылку или используй /buy для оплаты Stars."
                 )
             # Other buyers never see anyone else's Telegram ID or purchases.
             return
@@ -855,6 +871,7 @@ async def run() -> None:
                 "/links 20 — бессрочный доступ, 20 ссылок\n"
                 "/invite1d — доступ на 1 день, 1 ссылка\n"
                 "/links1d 20 — доступ на 1 день, 20 ссылок\n"
+                "/buy — оплата через Stars в отдельном боте\n"
                 "/stats — только общая статистика, без пользователей\n"
                 "/status — здоровье сканера и очереди\n"
                 "/pushall — перепроверить пропущенные NFT\n"
@@ -1040,6 +1057,11 @@ async def run() -> None:
         log.info("NFT Radar connected. Commercial admin mode enabled.")
         tasks = [asyncio.create_task(delivery_worker(bot)),
                  asyncio.create_task(monitor(user, bot))]
+        if PAYMENT_BOT_TOKEN:
+            tasks.append(asyncio.create_task(StarsMerchant(
+                PAYMENT_BOT_TOKEN, store, me.username,
+                STARS_PRICE_1D, STARS_PRICE_LIFETIME,
+            ).run()))
         if LIVE_ENABLED:
             tasks.append(asyncio.create_task(
                 run_stream(lambda event: live_market_event(event, user),
