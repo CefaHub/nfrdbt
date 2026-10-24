@@ -21,6 +21,8 @@ from delivery import dispatch_next, fallback_text
 from scan_pacing import remaining_pause
 from recipient_filter import recipient_from_history, filter_pending
 from recipient_recheck import schedule_review, due_reviews, reschedule_review, drop_review
+from recovery import (schedule_recovery, current_recovery, complete_recovery_item,
+                      fail_recovery_item, pending_count)
 from see_live import HEALTH as LIVE_HEALTH, run_stream
 from live_market import live_nft_notification
 
@@ -75,6 +77,12 @@ LIVE_COUNTERS = {
     "last_new": None,
 }
 DELIVERY_WAKE = asyncio.Event()
+RECOVERY_WAKE = asyncio.Event()
+RECOVERY_LOOKBACK = max(1, min(100, int(os.getenv("RECOVERY_LOOKBACK", "25"))))
+RECOVERY_MAX_TOTAL = max(1, min(3000, int(os.getenv("RECOVERY_MAX_TOTAL", "1500"))))
+RECOVERY_ITEM_DELAY = max(1.0, float(os.getenv("RECOVERY_ITEM_DELAY", "2.0")))
+RECOVERY_STATS = {"checked": 0, "found": 0, "errors": 0, "last_error": None,
+                  "last_slug": None, "started": None}
 DELIVERY_STATS = {
     "sent": 0,
     "plain": 0,
@@ -318,6 +326,86 @@ async def get_head_for_collection(
         state.save()
     log.info("Resolved NFT collection from resale: gift_id=%s -> %s", base_id, actual)
     return actual, item
+
+
+async def recovery_worker(user: TelegramClient, bot: TelegramClient) -> None:
+    """Rescan recent NFT numbers saved by /pushall, at a conservative rate.
+
+    Existing main scan cursors are left untouched. Individual recovery jobs
+    survive process restarts and only advance after the Telegram lookup.
+    """
+    while True:
+        try:
+            if (not state.owner_id or state.data.get("paused")
+                    or not state.data.get("recovery_jobs")):
+                RECOVERY_WAKE.clear()
+                try:
+                    await asyncio.wait_for(RECOVERY_WAKE.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            item = current_recovery(state.data)
+            if item is None:
+                state.save()
+                continue
+            slug, number = item
+            full_slug = f"{slug}-{number}"
+            try:
+                details = await user(
+                    functions.payments.GetUniqueStarGiftRequest(slug=full_slug)
+                )
+                gift = details.gift
+                if str(getattr(gift, "slug", "")).lower() != full_slug.lower():
+                    raise ValueError("Recovered NFT slug mismatch")
+                if not getattr(gift, "crafted", False):
+                    history = original_participants(gift, details)
+                    if recipient_from_history(history):
+                        try:
+                            enriched = await asyncio.wait_for(
+                                resolve_original_participants(gift, details, user),
+                                timeout=2.5,
+                            )
+                            if recipient_from_history(enriched):
+                                history = enriched
+                        except Exception:
+                            pass
+                        event = make_event(
+                            gift, extract_attributes(gift), now_utc(), rare=False
+                        )
+                        event["original_participants"] = history
+                        if state.record_nft_once(event):
+                            RECOVERY_STATS["found"] += 1
+                            NFT_HEALTH["last_queued_slug"] = full_slug
+                            log.info("NFT REPLAY QUEUED: %s, pending=%d",
+                                     full_slug, len(state.data["pending"]))
+                            await deliver_pending(bot)
+                    else:
+                        # Metadata may arrive later than the mint itself.
+                        schedule_review(state.data, full_slug)
+                complete_recovery_item(state.data)
+                RECOVERY_STATS["checked"] += 1
+                RECOVERY_STATS["last_slug"] = full_slug
+                state.save()
+            except FloodWaitError as exc:
+                RECOVERY_STATS["last_error"] = f"FloodWait {exc.seconds}s"
+                log.warning("NFT REPLAY FloodWait %ds; cursor unchanged", exc.seconds)
+                await asyncio.sleep(max(3, exc.seconds + 3))
+                continue
+            except Exception as exc:
+                RECOVERY_STATS["errors"] += 1
+                RECOVERY_STATS["last_error"] = f"{full_slug}: {type(exc).__name__}"
+                skipped = fail_recovery_item(state.data)
+                state.save()
+                log.warning("NFT REPLAY failed %s (%s); skipped=%s",
+                            full_slug, type(exc).__name__, skipped)
+                await asyncio.sleep(6)
+                continue
+            await asyncio.sleep(RECOVERY_ITEM_DELAY)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("NFT REPLAY worker error; retry later")
+            await asyncio.sleep(10)
 
 
 async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
@@ -570,6 +658,8 @@ async def live_market_event(event: dict, user: TelegramClient | None = None) -> 
         LIVE_COUNTERS["minute_count"] = 0
     if LIVE_COUNTERS["minute_count"] >= LIVE_MAX_NEW_PER_MINUTE:
         LIVE_COUNTERS["new_skipped_limit"] += 1
+        if schedule_review(state.data, event["slug"]):
+            state.save()
         return
     try:
         details = await user(
@@ -582,6 +672,8 @@ async def live_market_event(event: dict, user: TelegramClient | None = None) -> 
         history = original_participants(collectible, details)
         if not recipient_from_history(history):
             LIVE_COUNTERS["filtered_no_recipient"] += 1
+            if schedule_review(state.data, event["slug"]):
+                state.save()
             return
         try:
             enriched = await asyncio.wait_for(
@@ -601,8 +693,12 @@ async def live_market_event(event: dict, user: TelegramClient | None = None) -> 
             log.info("LIVE GIFT %s (recipient visible)", event["slug"])
             await deliver_pending(None)
     except FloodWaitError as exc:
+        if schedule_review(state.data, event["slug"]):
+            state.save()
         log.warning("LIVE recipient verification delayed by %ds", exc.seconds)
     except Exception as exc:
+        if schedule_review(state.data, event["slug"]):
+            state.save()
         log.debug("LIVE verification failed %s: %s",
                   event["slug"], type(exc).__name__)
 
@@ -652,6 +748,8 @@ async def run() -> None:
                 "<b>Gift Radar</b>\n"
                 "Новые подарки с указанным получателем.\n\n"
                 "/status — состояние\n"
+                "/pushall — отправить очередь и перепроверить NFT\n"
+                "/flush — повторить отправку очереди\n"
                 "/last — последние подарки\n"
                 "/pause — отключить уведомления\n"
                 "/resume — включить уведомления",
@@ -670,7 +768,11 @@ async def run() -> None:
                 f"Последняя проверка: {NFT_HEALTH['last_scan_finished'] or 'нет'} UTC\n"
                 f"see.tg: {html.escape(live)}\n"
                 f"Из потока: {LIVE_COUNTERS['new_notified']}\n"
-                f"Очередь: {len(state.data['pending'])}\n"
+                f"Очередь отправки: {len(state.data['pending'])}\n"
+                f"Повторная проверка: {pending_count(state.data)} NFT\n"
+                f"Найдено повторно: {RECOVERY_STATS['found']}\n"
+                f"Ошибок перепроверки: {RECOVERY_STATS['errors']}\n"
+                f"Пропущено после ошибок: {state.data.get('recovery_skipped', 0)}\n"
                 f"Последний новый с получателем: {NFT_HEALTH['last_queued_slug'] or 'нет'}\n"
                 f"Последний без получателя: {NFT_HEALTH['last_filtered_slug'] or 'нет'}\n"
                 f"На повторной проверке: {len(state.data.get('recipient_reviews') or {})}\n"
@@ -680,6 +782,38 @@ async def run() -> None:
                 f"Ошибка отправки: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}",
                 parse_mode="html",
             )
+        elif cmd in ("/pushall", "/flush"):
+            if state.data.get("paused"):
+                await event.respond("Уведомления на паузе. Сначала /resume.")
+                return
+            if cmd == "/pushall" and not TRACK_RARE_NFTS:
+                await event.respond("NFT-сканер выключен (TRACK_RARE_NFTS=false).")
+                return
+            queued = len(state.data["pending"])
+            await deliver_pending(bot)
+            if cmd == "/pushall":
+                collections, gifts = schedule_recovery(
+                    state.data, RECOVERY_LOOKBACK, RECOVERY_MAX_TOTAL
+                )
+                # Re-attempt eligible gifts whose recipient details were
+                # temporarily missing on first request.
+                for job in (state.data.get("recipient_reviews") or {}).values():
+                    if isinstance(job, dict):
+                        job["next_at"] = 0
+                state.save()
+                RECOVERY_WAKE.set()
+                await event.respond(
+                    f"Проталкиваю очередь: {queued} уведомлений.\n"
+                    f"На перепроверку: {gifts} NFT"
+                    f" ({collections} новых задач по коллекциям).\n"
+                    "Отправка и проверка идут постепенно из-за лимитов Telegram.\n"
+                    "Прогресс: /status"
+                )
+            else:
+                await event.respond(
+                    f"Повторно запустил доставку. В очереди: {queued}.\n"
+                    "Если не приходит — смотри ошибку отправки в /status."
+                )
         elif cmd == "/check":
             # Owner-only diagnosis. Never enqueue an arbitrary older gift.
             slug = argument.strip().split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
@@ -745,12 +879,11 @@ async def run() -> None:
                                 link_preview=False)
         elif cmd == "/pause":
             state.set_paused(True)
-            state.data["pending"] = []
-            state.save()
-            await event.respond("Уведомления выключены.")
+            await event.respond("Уведомления приостановлены. Очередь сохранена.")
         elif cmd == "/resume":
             state.set_paused(False)
             await event.respond("Уведомления включены.")
+            RECOVERY_WAKE.set()
             await deliver_pending(bot)
         elif cmd == "/testdelivery":
             # Hidden service command: test actual delivery outbox.
@@ -808,6 +941,8 @@ async def run() -> None:
         if TRACK_RARE_NFTS:
             tasks.append(asyncio.create_task(monitor_rare_nfts(user, bot)))
             tasks.append(asyncio.create_task(retry_new_recipient_details(user, bot)))
+            tasks.append(asyncio.create_task(recovery_worker(user, bot)))
+            RECOVERY_WAKE.set()  # Resume any interrupted /pushall after restart.
         await asyncio.gather(*tasks)
     finally:
         await bot.disconnect()
