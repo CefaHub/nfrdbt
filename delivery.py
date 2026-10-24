@@ -37,13 +37,12 @@ def fallback_text(item: dict[str, Any]) -> str:
     if item.get("kind") == "delivery_test":
         return "Проверка доставки\nСообщение отправлено."
     if item.get("kind") in {"new_nft", "rare_nft"}:
-        from recipient_filter import recipient_from_history
-        person = recipient_from_history(item.get("original_participants"))
-        recipient = str(person.get("label") or "Получатель") if person else "Не указан"
+        owner = item.get("owner") or {}
+        label = str(owner.get("label") or "Не указан")
         return (
             f"{item.get('title', 'NFT')} #{item.get('number', '?')}\n"
             f"https://t.me/nft/{item.get('slug', '')}\n\n"
-            f"Кому подарили: {recipient}\n"
+            f"Владелец: {label}\n"
             f"Модель: {item.get('model', '?')}"
         )
     return str(item.get("title") or "Gift Radar")
