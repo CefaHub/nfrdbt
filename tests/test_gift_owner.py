@@ -115,7 +115,8 @@ class CurrentOwnerTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await resolve_current_owner(gift, SimpleNamespace(), client)
         self.assertEqual(result["label"], "Telegram ID 99")
-        self.assertIsNone(profile_url(result))
+        self.assertEqual(profile_url(result), "tg://user?id=99")
+        self.assertNotIn("WrongPerson", str(result))
 
 
 if __name__ == "__main__":
