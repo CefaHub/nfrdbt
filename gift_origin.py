@@ -37,6 +37,9 @@ def _participant(peer: Any, role: str, response: Any) -> dict | None:
     elif kind == "PeerChannel":
         pid, kind_label = getattr(peer, "channel_id", None), "channel"
         entities = getattr(response, "chats", []) or []
+    elif kind == "PeerChat":
+        pid, kind_label = getattr(peer, "chat_id", None), "chat"
+        entities = getattr(response, "chats", []) or []
     else:
         return None
     if not isinstance(pid, int) or pid <= 0:
