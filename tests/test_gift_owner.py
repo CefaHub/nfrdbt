@@ -44,14 +44,19 @@ class CurrentOwnerTests(unittest.IsolatedAsyncioTestCase):
         owner = current_owner(gift, response)
         self.assertEqual(owner["label"], "@ActualOwner")
 
-    def test_hidden_current_owner_is_not_fake_public_profile(self):
+    def test_hidden_current_owner_uses_verified_id_deep_link(self):
         gift = SimpleNamespace(owner_id=PeerUser(99))
         response = SimpleNamespace(users=[
             SimpleNamespace(id=99, username=None, first_name="Private"),
         ])
         owner = current_owner(gift, response)
         self.assertEqual(owner["label"], "Private")
-        self.assertIsNone(profile_url(owner))
+        self.assertEqual(profile_url(owner), "tg://user?id=99")
+
+    def test_invalid_or_unverified_owner_does_not_link_to_recipient(self):
+        self.assertIsNone(profile_url({"kind": "name", "label": "Unknown", "id": 77}))
+        self.assertIsNone(profile_url({"kind": "user", "id": -5, "url": None}))
+        self.assertIsNone(profile_url(None))
 
     def test_ownership_from_channel(self):
         gift = SimpleNamespace(owner_id=PeerChannel(7))
