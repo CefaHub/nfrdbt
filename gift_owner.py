@@ -2,8 +2,9 @@
 
 Telegram's StarGiftUnique.owner_id is the current Telegram owner peer;
 owner_address is a TON wallet and owner_name is display text only.
-A hosted gift's host_id is NOT the owner. When no verified public profile
-exists we omit the profile button rather than link to the wrong person.
+A hosted gift's host_id is NOT the owner. For owners without a public @username, Telegram supports a tg://user?id=
+deep link to a known user ID (subject to the owner's privacy settings).
+Never substitute the original gift recipient or hosting account.
 """
 from __future__ import annotations
 
@@ -97,14 +98,24 @@ async def resolve_current_owner(unique: Any, response: Any, client: Any) -> dict
 
 
 def profile_url(owner: Any) -> str | None:
-    """Only expose verified public t.me handles to URL buttons."""
+    """Owner's profile URL when Telegram supplies its current peer ID/username.
+
+    Public usernames use https://t.me/<username>. A private user who lacks
+    a public username may still be opened via tg://user?id=<id> (Telegram
+    may block the mention based on privacy settings). Never replace a
+    missing owner ID with the original gift recipient's ID.
+    """
     if not isinstance(owner, dict):
         return None
+    kind = owner.get("kind")
     url = owner.get("url")
-    if (owner.get("kind") in {"user", "channel", "chat"}
-            and isinstance(url, str) and url.startswith("https://t.me/")
-            and url.count("/") == 3):
+    if (kind in {"user", "channel", "chat"} and isinstance(url, str)
+            and url.startswith("https://t.me/") and url.count("/") == 3):
         handle = url.removeprefix("https://t.me/")
-        if len(handle) >= 5 and handle.replace("_", "").isalnum():
+        if 5 <= len(handle) <= 32 and handle.replace("_", "").isalnum():
             return url
+    if kind == "user":
+        peer_id = owner.get("id")
+        if type(peer_id) is int and peer_id > 0:
+            return f"tg://user?id={peer_id}"
     return None
