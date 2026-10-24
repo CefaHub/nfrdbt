@@ -780,13 +780,13 @@ async def run() -> None:
                 if result == "activated":
                     await event.respond(
                         "Доступ к NFT-радару активирован! Новые находки "
-                        "будут приходить сюда автоматически.\\n"
-                        "/status — состояние подписки\\n"
+                        "будут приходить сюда автоматически.\n"
+                        "/status — состояние подписки\n"
                         "/stop — отключить уведомления."
                     )
                 elif result == "existing":
                     await event.respond(
-                        "Доступ уже активирован, уведомления включены.\\n"
+                        "Доступ уже активирован, уведомления включены.\n"
                         "/status — состояние подписки."
                     )
                 else:
@@ -799,7 +799,7 @@ async def run() -> None:
             if store.is_subscribed(sender):
                 if cmd in ("/start", "/status", "/help", "/ping"):
                     await event.respond(
-                        "NFT-радар активен. Новые подарки приходят автоматически.\\n"
+                        "NFT-радар активен. Новые подарки приходят автоматически.\n"
                         "/stop — отключить уведомления."
                     )
                 elif cmd in ("/stop", "/leave"):
@@ -824,16 +824,16 @@ async def run() -> None:
 
         if cmd in ("/start", "/help", "/admin"):
             await event.respond(
-                "<b>Gift Radar — админ-панель</b>\\n"
-                "/invite — создать ссылку на одного покупателя\\n"
-                "/links 20 — создать партию из 20 ссылок (до 50 за запрос)\\n"
-                "/stats — только общая статистика, без пользователей\\n"
-                "/status — здоровье сканера и очереди\\n"
-                "/pushall — перепроверить пропущенные NFT\\n"
-                "/flush — разбудить рассылку\\n"
-                "/last — последние NFT\\n"
-                "/check ССЫЛКА — диагностика одного NFT\\n"
-                "/pause /resume — пауза и возобновление\\n"
+                "<b>Gift Radar — админ-панель</b>\n"
+                "/invite — создать ссылку на одного покупателя\n"
+                "/links 20 — создать партию из 20 ссылок (до 50 за запрос)\n"
+                "/stats — только общая статистика, без пользователей\n"
+                "/status — здоровье сканера и очереди\n"
+                "/pushall — перепроверить пропущенные NFT\n"
+                "/flush — разбудить рассылку\n"
+                "/last — последние NFT\n"
+                "/check ССЫЛКА — диагностика одного NFT\n"
+                "/pause /resume — пауза и возобновление\n"
                 "Ссылки одноразовые, без срока действия. "
                 "Общее количество покупателей и ссылок не ограничено кодом.",
                 parse_mode="html",
@@ -858,19 +858,19 @@ async def run() -> None:
             # Only the hardcoded admin receives inventory links.
             for i in range(0, len(links), 40):
                 await event.respond(
-                    "Ссылки для автовыдачи (каждая на одного покупателя):\\n"
-                    + "\\n".join(links[i:i + 40]),
+                    "Ссылки для автовыдачи (каждая на одного покупателя):\n"
+                    + "\n".join(links[i:i + 40]),
                     link_preview=False,
                 )
         elif cmd in ("/stats", "/linkstats", "/friends"):
             st = store.stats()
             await event.respond(
-                "<b>Статистика NFT-радара</b>\\n"
-                f"Активных подписок: {st['active_users']}\\n"
-                f"Всего активаций: {st['licensed_users'] - 1}\\n"
-                f"Неиспользованных ссылок: {st['unused_links']}\\n"
-                f"Активированных ссылок: {st['redeemed_links']}\\n"
-                f"Подписчиков с очередью: {st['pending_subscribers']}\\n"
+                "<b>Статистика NFT-радара</b>\n"
+                f"Активных подписок: {st['active_users']}\n"
+                f"Всего активаций: {st['licensed_users'] - 1}\n"
+                f"Неиспользованных ссылок: {st['unused_links']}\n"
+                f"Активированных ссылок: {st['redeemed_links']}\n"
+                f"Подписчиков с очередью: {st['pending_subscribers']}\n"
                 "Данные пользователей и их Telegram ID не отображаются.",
                 parse_mode="html",
             )
@@ -881,18 +881,18 @@ async def run() -> None:
             if "new" in disabled:
                 live += " (new отключён на see.tg)"
             await event.respond(
-                "<b>Gift Radar</b>\\n"
-                f"Уведомления: {'пауза' if state.data['paused'] else 'включены'}\\n"
-                f"Подписчиков: {st['active_users']}\\n"
-                f"Ожидают уведомления: {st['pending_subscribers']}\\n"
-                f"Всего NFT-событий в базе: {st['alerts']}\\n"
-                f"Сканер: {NFT_HEALTH['sweep_progress']}/{NFT_HEALTH['candidates']} коллекций\\n"
-                f"Последняя проверка: {NFT_HEALTH['last_scan_finished'] or 'нет'} UTC\\n"
-                f"see.tg: {html.escape(live)}\\n"
-                f"Из потока: {LIVE_COUNTERS['new_notified']}\\n"
-                f"На перепроверке: {pending_count(state.data)} NFT\\n"
-                f"Последняя отправка: {DELIVERY_STATS['last_sent'] or 'нет'} UTC\\n"
-                f"Ошибок отправки: {DELIVERY_STATS['errors']}\\n"
+                "<b>Gift Radar</b>\n"
+                f"Уведомления: {'пауза' if state.data['paused'] else 'включены'}\n"
+                f"Подписчиков: {st['active_users']}\n"
+                f"Ожидают уведомления: {st['pending_subscribers']}\n"
+                f"Всего NFT-событий в базе: {st['alerts']}\n"
+                f"Сканер: {NFT_HEALTH['sweep_progress']}/{NFT_HEALTH['candidates']} коллекций\n"
+                f"Последняя проверка: {NFT_HEALTH['last_scan_finished'] or 'нет'} UTC\n"
+                f"see.tg: {html.escape(live)}\n"
+                f"Из потока: {LIVE_COUNTERS['new_notified']}\n"
+                f"На перепроверке: {pending_count(state.data)} NFT\n"
+                f"Последняя отправка: {DELIVERY_STATS['last_sent'] or 'нет'} UTC\n"
+                f"Ошибок отправки: {DELIVERY_STATS['errors']}\n"
                 f"Последняя ошибка: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}",
                 parse_mode="html",
             )
@@ -937,8 +937,8 @@ async def run() -> None:
                 recipient = recipient_from_history(history)
                 seen = slug in (state.data.get("seen_nft_slugs") or [])
                 await event.respond(
-                    f"<b>{html.escape(slug)}</b>\\n"
-                    f"Получатель: {'есть' if recipient else 'не указан'}\\n"
+                    f"<b>{html.escape(slug)}</b>\n"
+                    f"Получатель: {'есть' if recipient else 'не указан'}\n"
                     f"Ранее учтён: {'да' if seen else 'нет'}",
                     parse_mode="html", link_preview=False,
                 )
@@ -965,7 +965,7 @@ async def run() -> None:
                     f'<a href="https://t.me/nft/{slug}">'
                     f'{title} #{html.escape(str(item.get("number") or "?"))}</a>'
                 )
-            await event.respond("\\n".join(rows), parse_mode="html",
+            await event.respond("\n".join(rows), parse_mode="html",
                                 link_preview=False)
         elif cmd == "/pause":
             state.set_paused(True)
