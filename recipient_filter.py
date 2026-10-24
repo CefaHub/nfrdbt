@@ -10,14 +10,17 @@ def recipient_from_history(participants: object) -> dict | None:
         if not isinstance(p, dict) or p.get("role") != "recipient":
             continue
         # Only Telegram-provided recipient peer IDs, not owner_name or guesses.
-        if p.get("type") not in {"user", "channel"}:
+        if p.get("type") not in {"user", "channel", "chat"}:
             continue
         user_id = p.get("id")
         url = p.get("url")
         if not isinstance(user_id, int) or user_id <= 0:
             continue
-        if isinstance(url, str) and (url.startswith("https://t.me/") or
-                                     url == f"tg://user?id={user_id}"):
+        # Telegram's original-details attribute proves the recipient
+        # even if a private channel/chat has no public link.
+        if url is None or (isinstance(url, str)
+                           and (url.startswith("https://t.me/")
+                                or url == f"tg://user?id={user_id}")):
             return p
     return None
 
