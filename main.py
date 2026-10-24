@@ -784,6 +784,14 @@ async def run() -> None:
 
         if sender != ADMIN_ID:
             if cmd in ("/buy", "/pay", "/payment"):
+                if not PAYMENT_BOT_TOKEN or not (
+                    STARS_PRICE_1D > 0 or STARS_PRICE_LIFETIME > 0
+                ):
+                    await event.respond(
+                        "Оплата Stars пока не настроена. "
+                        "Доступ можно активировать по коду, полученному после покупки."
+                    )
+                    return
                 await event.respond(
                     "NFT Gift Radar — оплата через Telegram Stars ⭐\n"
                     f"Перейди в @{MERCHANT_USERNAME} и выбери тариф.\n"
