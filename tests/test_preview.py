@@ -64,7 +64,8 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
             "label": "Telegram ID 99", "url": None,
         }
         msg = message_for_gift(gift)
-        self.assertIn("Владелец: Telegram ID 99", msg)
+        self.assertIn('href="tg://user?id=99"', msg)
+        self.assertIn("Telegram ID 99", msg)
         self.assertNotIn("Recipient72", msg)
         buttons = nft_buttons(gift)
         self.assertEqual(len(buttons), 2)
