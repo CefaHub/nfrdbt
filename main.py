@@ -19,6 +19,7 @@ from gift_origin import original_participants, resolve_original_participants
 from delivery import dispatch_next, fallback_text
 from scan_pacing import remaining_pause
 from recipient_filter import recipient_from_history, filter_pending
+from recipient_recheck import schedule_review, due_reviews, reschedule_review, drop_review
 from see_live import HEALTH as LIVE_HEALTH, run_stream
 from live_market import live_nft_notification
 
@@ -405,9 +406,22 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                                         NFT_HEALTH["notified_nfts"] += 1
                                         NFT_HEALTH["discovered"] += 1
                                         NFT_HEALTH["last_found"] = now_utc()
-                                        log.info("NEW GIFT %s (recipient visible)", collectible.slug)
+                                        NFT_HEALTH["last_queued_slug"] = str(collectible.slug)
+                                        log.info("NFT QUEUED: %s recipient=%s pending=%d",
+                                                 collectible.slug, history[0]["label"],
+                                                 len(state.data["pending"]))
+                                    else:
+                                        NFT_HEALTH["last_duplicate_slug"] = str(collectible.slug)
+                                        log.info("NFT ALREADY SEEN: %s", collectible.slug)
                                 else:
                                     NFT_HEALTH["filtered_no_recipient"] += 1
+                                    NFT_HEALTH["last_filtered_slug"] = str(collectible.slug)
+                                    scheduled = schedule_review(state.data, str(collectible.slug))
+                                    if scheduled:
+                                        state.save()
+                                    log.info("NFT NO RECIPIENT: %s review=%s",
+                                             collectible.slug,
+                                             "scheduled" if scheduled else "already scheduled/full")
                             state.set_collection_issued(resolved, number)
                             await deliver_pending(bot)
                     except FloodWaitError:
