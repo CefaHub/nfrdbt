@@ -9,6 +9,9 @@ import os
 import tempfile
 from typing import Any, Iterable
 from uuid import uuid4
+import hashlib
+import secrets
+import time
 
 
 def now_utc() -> str:
@@ -44,6 +47,8 @@ class RadarState:
             "version": 1,
             "initialized": False,
             "owner_id": None,
+            "subscribers": [],
+            "invites": [],
             "activation_consumed": False,
             "paused": False,
             "last_check": None,
@@ -113,12 +118,17 @@ class RadarState:
         self.data["last_check"] = now_utc()
         if new_events:
             self.data["history"] = (self.data["history"] + new_events)[-50:]
+            for event in new_events:
+                if self.owner_id is not None:
+                    event["targets"] = self.recipient_ids
             self.data["pending"] = self.data["pending"] + new_events
         self.save()
         return new_events
 
     def record_rare_nft(self, event: dict[str, Any]) -> None:
         event = dict(event, event_id=uuid4().hex)
+        if self.owner_id is not None:
+            event["targets"] = self.recipient_ids
         self.data["history"] = (self.data["history"] + [event])[-50:]
         # Pause only stops sending; keep every discovered NFT on disk
         # so /resume or /pushall can still deliver it later.
@@ -158,6 +168,93 @@ class RadarState:
     @property
     def owner_id(self) -> int | None:
         return self.data["owner_id"]
+
+
+    @property
+    def recipient_ids(self) -> list[int]:
+        """The primary owner plus explicitly invited subscribers."""
+        if self.owner_id is None:
+            return []
+        recipients = [self.owner_id]
+        for value in self.data.get("subscribers", []):
+            try:
+                user_id = int(value)
+            except (ValueError, TypeError):
+                continue
+            if user_id > 0 and user_id not in recipients:
+                recipients.append(user_id)
+        return recipients
+
+    def is_subscriber(self, user_id: int) -> bool:
+        return user_id != self.owner_id and user_id in self.recipient_ids
+
+    def create_invite(self, ttl_seconds: int = 86400) -> str:
+        """Generate a one-time invitation; persist only its SHA-256 digest."""
+        if self.owner_id is None:
+            raise RuntimeError("Pair the bot owner before inviting anyone.")
+        now = int(time.time())
+        invites = [v for v in self.data.get("invites", [])
+                   if isinstance(v, dict) and int(v.get("expires", 0)) > now]
+        if len(invites) >= 5:
+            # Limit outstanding secrets to prevent unused invite buildup.
+            invites = invites[-4:]
+        token = secrets.token_urlsafe(16)
+        invites.append({
+            "hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            "expires": now + max(60, int(ttl_seconds)),
+        })
+        self.data["invites"] = invites
+        self.save()
+        return token
+
+    def accept_invite(self, token: str, user_id: int) -> bool:
+        """Accept invite once; never grant ownership or management rights."""
+        if self.owner_id is None or user_id <= 0 or user_id == self.owner_id:
+            return False
+        if self.is_subscriber(user_id):
+            return True
+        if len(self.recipient_ids) >= 11 or not (10 <= len(token) <= 100):
+            return False
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        now = int(time.time())
+        invites = self.data.get("invites", [])
+        for i, invite in enumerate(invites):
+            if (isinstance(invite, dict) and
+                    int(invite.get("expires", 0)) > now and
+                    secrets.compare_digest(str(invite.get("hash") or ""), digest)):
+                del invites[i]
+                self.data.setdefault("subscribers", []).append(user_id)
+                self.save()
+                return True
+        return False
+
+    def remove_subscriber(self, user_id: int) -> bool:
+        people = self.data.get("subscribers", [])
+        if user_id not in people:
+            return False
+        people.remove(user_id)
+        # An unsubscribed user must not get deferred messages.
+        for item in self.data["pending"]:
+            if "targets" in item:
+                item["targets"] = [x for x in item["targets"] if x != user_id]
+        self.save()
+        return True
+
+    def mark_delivered_to(self, event_id: str, user_id: int) -> None:
+        """ACK one recipient, not the whole NFT, so others can retry."""
+        for item in self.data["pending"]:
+            if item.get("event_id") != event_id:
+                continue
+            delivered = item.setdefault("delivered_to", [])
+            if user_id not in delivered:
+                delivered.append(user_id)
+            targets = item.get("targets", [self.owner_id])
+            if not any(x in self.recipient_ids and x not in delivered
+                       for x in targets):
+                self.pop_delivered(event_id)
+            else:
+                self.save()
+            return
 
     def set_owner(self, user_id: int) -> None:
         if self.owner_id is not None:
