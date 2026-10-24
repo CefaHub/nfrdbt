@@ -548,520 +548,99 @@ async def run() -> None:
         cmd, argument = command_name(event.raw_text)
         if not cmd.startswith("/"):
             return
+
         if state.owner_id is None:
-            if cmd == "/start" and state.consume_activation_key(argument, event.sender_id):
-                await event.respond("✅ Одноразовый ключ погашен! Бот привязан к твоему аккаунту. /help")
-                log.info("Активация: бот привязан к Telegram ID %d", event.sender_id)
+            if cmd == "/start" and state.consume_activation_key(
+                argument, event.sender_id
+            ):
+                await event.respond("Радар подключён.\n/status — состояние")
                 await deliver_pending(bot)
             else:
-                await event.respond(
-                    "🔐 Для первой привязки отправь /start КЛЮЧ. "
-                    "Ключ выдан отдельно владельцу; в логах он не публикуется."
-                )
+                await event.respond("Для подключения: /start КЛЮЧ")
             return
+
         if event.sender_id != state.owner_id:
-            await event.respond("⛔ Нет доступа.")
             return
-        if cmd == "/activate":
-            # Existing owner can consume the same single-use key once.
-            if state.consume_activation_key(argument, event.sender_id):
-                await event.respond("✅ Одноразовый ключ активирован и навсегда погашен в состоянии этого бота.")
-            elif state.data.get("activation_consumed", False):
-                await event.respond("🔒 Этот ключ уже использован. Повторная активация невозможна.")
-            else:
-                await event.respond("❌ Неверный одноразовый ключ.")
-        elif cmd == "/key":
+
+        if cmd in ("/start", "/help"):
             await event.respond(
-                "🔐 Статус одноразового ключа: " + state.activation_status()
-                + ". При Git-обновлениях статус хранится в /app/data/state.json."
-            )
-        elif cmd in ("/start", "/help"):
-            await event.respond(
-                "📡 <b>Gift Upgrade Radar</b>\n\n"
-                "/status — состояние\n"                "/live — статус see.tg WebSocket и ограничений\n"
-                "/value PlushPepe-123 — цена и продажи из live-потока\n"
-                "/delivery — очередь и ошибки доставки\n"
-                "/diagnose — диагностика NFT\n"
-                "/all on — все NFT с видимым первым получателем\n"
-                "/owner PlushPepe-123 — ссылка на профиль владельца\n"                "/origin PlushPepe-123 — первый отправитель и получатель\n"
-                "/deal PlushPepe-123 — способы связаться или купить\n"
-                "/watch PlushPepe-123 — следить за продажей\n"
-                "/watches — отслеживаемые NFT; /unwatch СЛАГ — отменить\n"
-                "/offer PlushPepe-123 1500 — черновик сделки\n"
-                "/all off — только редкие модели\n"
-                "/check PlushPepe — проверить коллекцию напрямую\n"
-                "/last — последние события\n"
-                "/test — пробное уведомление\n"                "/testdelivery — проверить реальную очередь отправки\n"
-                "/preview PartySparkler-189558 — проверить карточку NFT\n"
+                "<b>Gift Radar</b>\n"
+                "Новые подарки с указанным получателем.\n\n"
+                "/status — состояние\n"
+                "/last — последние подарки\n"
                 "/pause — отключить уведомления\n"
-                "/resume — включить уведомления\n"
-                "/key — статус одноразового ключа\n"
-                "/activate КЛЮЧ — использовать выданный ключ\n"
-                "/help — команды\n\n"
-                "Отслеживаю выпуск улучшенных NFT; включить все: /all on.", parse_mode="html"
+                "/resume — включить уведомления",
+                parse_mode="html",
             )
         elif cmd == "/status":
-            gifts = state.data["gifts"]
-            upgradeable = sum(1 for g in gifts.values() if g["upgrade_stars"] is not None)
-            await event.respond(
-                f"📡 <b>Радар {'⏸ на паузе' if state.data['paused'] else '🟢 активен'}</b>\n"
-                f"⏱ Каталог подарков: каждые {INTERVAL} сек\n"
-                f"💎 NFT: цель полного обхода {NFT_SWEEP_SECONDS} сек ({COLLECTIONS_PER_CYCLE} за пакет)\n"
-                f"⚡ see.tg Live: {html.escape(LIVE_HEALTH['status'])}, новых NFT: {LIVE_COUNTERS['new_notified']}\n"
-                f"🎁 Известных подарков: {len(gifts)}\n"
-                f"✨ С доступным апгрейдом: {upgradeable}\n"
-                f"💎 Радар NFT: {'включён' if TRACK_RARE_NFTS else 'выключен'}; "
-                f"коллекций с baseline: {len(state.data['collections'])}\n"
-                f"🔥 Редкая модель: ≤ {MAX_MODEL_RARITY_PCT:g}% или tier epic/legendary\n"
-                f"📬 В очереди: {len(state.data['pending'])}\n"
-                f"📥 Только NFT с получателем; отфильтровано: {NFT_HEALTH['filtered_no_recipient']}\n"
-                f"📤 Отправлено с запуска: {DELIVERY_STATS['sent']}\n"
-                f"⚠️ Ошибка доставки: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}\n"
-                f"🔔 Все новые NFT: {'включено' if all_nft_notifications() else 'только редкие'}\n"
-                f"🆕 Увидено новых NFT: {NFT_HEALTH['total_new_nfts']} (редких: {NFT_HEALTH['total_rare_nfts']})\n"
-                f"🕒 Последняя проверка каталога: {state.data['last_check'] or 'ещё не было'} (UTC)\n"
-                f"📡 NFT кандидатов: {NFT_HEALTH['candidates']}\n"
-                f"🔄 Прогресс обхода: {NFT_HEALTH['sweep_progress']}/{NFT_HEALTH['candidates']}\n"
-                f"✅ Завершено обходов: {NFT_HEALTH['sweeps_completed']}\n"
-                f"🕒 Последняя партия NFT: {NFT_HEALTH['last_scan_finished'] or 'ещё не было'} UTC\n"
-                f"🕒 Последний полный обход: {NFT_HEALTH['last_sweep_finished'] or 'ещё не было'} UTC\n"
-                f"❓ Коллекций без имени: {NFT_HEALTH['unresolved']}\n"
-                f"✅ Проверок NFT: {NFT_HEALTH['checked']}\n"
-                f"📬 Уведомлений создано: {NFT_HEALTH['notified_nfts']}\n"
-                f"⚠️ Ошибок: {NFT_HEALTH['errors']}\n"
-                f"🕒 Последний успешный NFT-запрос: {NFT_HEALTH['last_success'] or 'ни одного'}\n"
-                f"❗ Ошибка NFT: {html.escape(NFT_HEALTH['last_error'] or 'нет')}",
-                parse_mode="html",
-            )
-        elif cmd == "/live":
             disabled = LIVE_HEALTH.get("disabled_kinds") or []
-            counts = LIVE_HEALTH.get("event_counts") or {}
-            summary = ", ".join(
-                f"{label}: {counts.get(kind, 0)}"
-                for kind, label in (
-                    ("new", "новые NFT"), ("listing", "листинги"),
-                    ("price", "изменения цены"), ("sale", "продажи"),
-                    ("transfer", "передачи"),
-                )
-            )
+            live = LIVE_HEALTH["status"] if LIVE_ENABLED else "выключен"
             if "new" in disabled:
-                new_status = "⚠️ see.tg временно отключил событие new; MTProto продолжает сканирование"
-            elif counts.get("new", 0) == 0:
-                new_status = "ℹ️ see.tg пока не прислал ни одного события new"
-            else:
-                new_status = f"✅ Событий new: {counts['new']}"
+                live += " (события new отключены на стороне see.tg)"
             await event.respond(
-                "⚡ <b>NFT Radar 2.0 — see.tg Live</b>\n"
-                f"Подключение: {html.escape(LIVE_HEALTH['status'])}\n"
-                f"Режим: {'авторизованный' if LIVE_API_TOKEN else 'гость (имена могут быть скрыты)'}\n"
-                "REST-запросы: отключены; платных запросов: 0\n"
-                f"Событий потока: {LIVE_HEALTH['events_seen']}\n"
-                f"Типы событий: {html.escape(summary)}\n"
-                f"Временно отключены see.tg: {html.escape(', '.join(disabled) or 'нет')}\n"
-                f"{html.escape(new_status)}\n"
-                f"Сообщение сервера: {html.escape(LIVE_HEALTH.get('last_notice') or 'нет')}\n"
-                f"Новых NFT оповещено: {LIVE_COUNTERS['new_notified']}\n"
-                f"Без первого получателя: {LIVE_COUNTERS['filtered_no_recipient']}\n"
-                "Фильтр: только NFT с записью кому подарили (история Telegram)\n"
-                f"Пропущено из-за ограничения: {LIVE_COUNTERS['new_skipped_limit']}\n"
-                f"Наблюдаемых продаж: {LIVE_COUNTERS['sales_recorded']}\n"
-                f"Возможных сделок отправлено: {LIVE_COUNTERS['deals_notified']}\n"
-                f"Последнее событие: {LIVE_HEALTH['last_event'] or 'нет'}\n"
-                f"Переподключений: {LIVE_HEALTH['reconnects']}\n"
-                f"Ошибка: {html.escape(LIVE_HEALTH['last_error'] or 'нет')}\n"
-                f"Лимит новых NFT: {LIVE_MAX_NEW_PER_MINUTE}/мин, "
-                f"порог скидки: {(1 - LIVE_BARGAIN_RATIO)*100:g}%",
+                "<b>Gift Radar</b>\n"
+                f"Уведомления: {'пауза' if state.data['paused'] else 'включены'}\n"
+                "Фильтр: подарки с указанным получателем\n"
+                f"NFT-сканер: {NFT_HEALTH['sweep_progress']}/{NFT_HEALTH['candidates']} коллекций\n"
+                f"Последняя проверка: {NFT_HEALTH['last_scan_finished'] or 'нет'} UTC\n"
+                f"see.tg: {html.escape(live)}\n"
+                f"Из потока: {LIVE_COUNTERS['new_notified']}\n"
+                f"Очередь: {len(state.data['pending'])}\n"
+                f"Доставлено: {DELIVERY_STATS['sent']}\n"
+                f"Ошибка отправки: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}",
                 parse_mode="html",
             )
-        elif cmd == "/value":
-            slug = argument.strip().split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-            if not valid_gift_slug(slug):
-                await event.respond("Пример: /value SpicedWine-108832")
-                return
-            listing = (state.data.get("live_last_listings") or {}).get(slug)
-            if not listing:
-                await event.respond(
-                    f"📊 {slug}: рыночная цена ещё не встречалась в потоке.\n"
-                    "WebSocket не выгружает историю прошлых продаж. "
-                    "Оценка появится, когда будут наблюдения live."
-                )
-                return
-            sample = listing["event"]
-            score = estimate_listing(state.data, sample, threshold=LIVE_BARGAIN_RATIO)
-            if score.get("comparable"):
-                detail = (
-                    f"Медиана: {score['median_ton']:g} TON\n"
-                    f"Сравнение: {score['sample_size']} продаж; {score['scope']}\n"
-                    f"Отклонение: {score['discount_pct']:+g}% от медианы\n"
-                    f"Возможная недооценка: {'да, предварительно' if score['potential_bargain'] else 'не выявлена'}"
-                )
-            else:
-                detail = "Недостаточно данных: " + str(score.get("reason"))
-            await event.respond(
-                f"📊 <b>Оценка {html.escape(slug)}</b>\n"
-                f"Наблюдаемая цена: {html.escape((sample.get('price') or {}).get('display') or 'не указана')}\n"
-                f"Площадка: {html.escape(sample.get('market', '?'))}\n"
-                f"{html.escape(detail)}\n\n"
-                "⚠️ Только наблюдаемые сделки в live-потоке, не финансовая рекомендация.",
-                parse_mode="html",
-                buttons=[[Button.url("🎁 Открыть NFT", f"https://t.me/nft/{slug}")]],
-            )
-        elif cmd == "/delivery":
-            pending = state.data.get("pending") or []
-            first = pending[0] if pending else None
-            await event.respond(
-                "📤 <b>Доставка уведомлений</b>\n"
-                f"📬 В очереди: {len(pending)}\n"
-                f"✅ Отправлено с запуска: {DELIVERY_STATS['sent']}\n"
-                f"📝 Упрощённым текстом: {DELIVERY_STATS['plain']}\n"
-                f"🔁 Повторов: {DELIVERY_STATS['retries']}\n"
-                f"🕒 Последняя отправка: {DELIVERY_STATS['last_sent'] or 'нет'}\n"
-                f"💎 NFT-сканирование отдельно: {NFT_HEALTH['last_scan_finished'] or 'ещё не было'} UTC\n"
-                f"🔄 Прогресс обхода: {NFT_HEALTH['sweep_progress']}/{NFT_HEALTH['candidates']}\n"
-                f"⏱ Цель обхода: {NFT_SWEEP_SECONDS} сек (не время между уведомлениями)\n"
-                f"📌 Первое событие: {html.escape((first or {}).get('slug') or (first or {}).get('kind') or 'нет')}\n"
-                f"⚠️ Ошибка: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}\n"
-                f"⏱ Задержка повторной попытки: {DELIVERY_STATS['next_delay_sec']} сек\n"
-                f"🔔 Уведомления: {'на паузе' if state.data['paused'] else 'включены'}",
-                parse_mode="html",
-            )
-        elif cmd == "/diagnose":
-            candidates = nft_candidates()
-            head = ", ".join(x[0] for x in candidates[:6]) or "нет"
-            await event.respond(
-                "🔎 <b>Диагностика NFT</b>\n"
-                f"Кандидатов: {len(candidates)}; без названия: {NFT_HEALTH['unresolved']}\n"
-                f"Успешно: {NFT_HEALTH['checked']}; последний успешный: {NFT_HEALTH['last_success'] or 'нет'}\n"
-                f"Последняя партия: {NFT_HEALTH['last_scan_finished'] or 'нет'}\n"
-                f"Прогресс текущего обхода: {NFT_HEALTH['sweep_progress']}/{NFT_HEALTH['candidates']}\n"
-                f"Полных обходов: {NFT_HEALTH['sweeps_completed']}; цель: {NFT_SWEEP_SECONDS} сек\n"
-                f"Известных коллекций: {len(state.data['collections'])}\n"
-                f"Новых NFT просмотрено: {NFT_HEALTH['total_new_nfts']}; редких: {NFT_HEALTH['total_rare_nfts']}\n"
-                f"Без первого получателя: {NFT_HEALTH['filtered_no_recipient']}\n"
-                f"Оповещений поставлено: {NFT_HEALTH['notified_nfts']}; backlog: {NFT_HEALTH['backlog']}\n"
-                f"Уведомления: {'все NFT' if all_nft_notifications() else 'только редкие'}\n"
-                f"Последняя ошибка: {html.escape(NFT_HEALTH['last_error'] or 'нет')}\n"
-                f"Примеры: {html.escape(head)}", parse_mode="html"
-            )
-        elif cmd == "/check":
-            # Single direct API query to test access to a known collection.
-            slug = collection_slug(argument)
-            if not slug or len(slug) > 64:
-                await event.respond("Укажи название коллекции: /check PlushPepe")
-                return
-            try:
-                resolved, sample = await get_head_for_collection(user, slug, None)
-                minted = int(sample.availability_issued)
-                await event.respond(
-                    "✅ <b>NFT API отвечает!</b>\n"
-                    f"Коллекция: <b>{html.escape(str(sample.title))}</b>\n"
-                    f"Slug: <code>{html.escape(resolved)}</code>\n"
-                    f"Выпущено NFT: <b>{minted}</b>\n"
-                    f"Проверочный NFT: <a href=\"https://t.me/nft/{html.escape(str(sample.slug), quote=True)}\">открыть</a>\n\n"
-                    "Это тест доступности коллекции, а не уведомление о новом выпуске.",
-                    parse_mode="html", link_preview=False,
-                )
-            except FloodWaitError as exc:
-                await event.respond(f"⏳ Telegram временно ограничил запросы на {exc.seconds} секунд.")
-            except Exception as exc:
-                await event.respond(
-                    f"❌ Не удалось проверить коллекцию: "
-                    f"{html.escape(type(exc).__name__ + ': ' + str(exc)[:120])}",
-                    parse_mode="html",
-                )
-        elif cmd in ("/deal", "/watch", "/unwatch"):
-            slug = argument.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-            if not valid_gift_slug(slug):
-                await event.respond("Укажи NFT: /deal SpicedWine-108832\n"
-                                    "Или: /watch SpicedWine-108832")
-                return
-            if cmd == "/unwatch":
-                if slug in state.data.get("deal_watchlist", {}):
-                    del state.data["deal_watchlist"][slug]
-                    state.save()
-                    await event.respond(f"🔕 Убрал {slug} из отслеживания.")
-                else:
-                    await event.respond("Этого подарка нет в списке отслеживания.")
-                return
-            try:
-                snapshot = await fetch_deal_snapshot(user, slug)
-                if cmd == "/watch":
-                    watchlist = state.data.setdefault("deal_watchlist", {})
-                    if slug not in watchlist and len(watchlist) >= 20:
-                        await event.respond("Лимит — 20 одновременно отслеживаемых NFT.")
-                        return
-                    watchlist[slug] = snapshot
-                    state.save()
-                    prefix = "🔔 NFT добавлен в отслеживание.\n"
-                else:
-                    prefix = "🔎 Текущие возможности сделки:\n"
-                await event.respond(
-                    f"{prefix}"
-                    f"🎁 <a href=\"https://t.me/nft/{html.escape(slug, quote=True)}\">"
-                    f"{html.escape(slug)}</a>\n\n"
-                    f"{html.escape(deal_details(snapshot))}\n\n"
-                    + (
-                        f"Проверяю изменения каждые {DEAL_WATCH_INTERVAL} сек. "
-                        f"Чтобы отключить: /unwatch {slug}.\n"
-                        if cmd == "/watch" else
-                        f"Чтобы получить уведомление при изменении: /watch {slug}.\n"
-                    )
-                    + "При скрытом владельце невозможно надёжно определить его "
-                    "Telegram-аккаунт по одному отображаемому имени.",
-                    parse_mode="html", link_preview=False,
-                    buttons=deal_watch_buttons(slug, snapshot),
-                )
-            except FloodWaitError as exc:
-                await event.respond(f"⏳ Telegram ограничил запросы на {exc.seconds} секунд.")
-            except Exception as exc:
-                log.warning("Deal lookup failed for %s: %s", slug, exc)
-                await event.respond("❌ Не удалось проверить NFT через Telegram API.")
-        elif cmd == "/watches":
-            watched = state.data.get("deal_watchlist") or {}
-            if not watched:
-                await event.respond("🔕 Пока ничего не отслеживаю.\n"
-                                    "Добавь подарок: /watch SpicedWine-108832")
-            else:
-                lines = ["🔔 <b>Отслеживаемые NFT</b>"]
-                for slug in list(watched)[:20]:
-                    lines.append(
-                        f"• <a href=\"https://t.me/nft/{html.escape(slug, quote=True)}\">"
-                        f"{html.escape(slug)}</a>"
-                    )
-                lines.append(f"\nПроверка раз в {DEAL_WATCH_INTERVAL} сек; "
-                             "отмена — /unwatch НАЗВАНИЕ-НОМЕР.")
-                await event.respond("\n".join(lines), parse_mode="html",
-                                    link_preview=False)
-        elif cmd == "/origin":
-            slug = argument.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-            if not valid_gift_slug(slug):
-                await event.respond("Пример: /origin SpicedWine-108832")
-                return
-            try:
-                details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
-                participants = await resolve_original_participants(
-                    details.gift, details, user,
-                )
-                buttons = [[Button.url("🎁 Сам NFT", f"https://t.me/nft/{slug}")]]
-                buttons.extend(original_buttons(participants, Button.url))
-                if participants:
-                    msg = (
-                        f"📜 <b>История NFT {html.escape(slug)}</b>\n\n"
-                        + origin_lines({"original_participants": participants})
-                        + "\nОтправитель и первый получатель — исторические участники. "
-                        "Они могли давно передать или продать подарок."
-                    )
-                else:
-                    msg = (
-                        f"📜 <b>{html.escape(slug)}</b>\n"
-                        "В доступных данных NFT нет первоначальных участников. "
-                        "Это бывает, если история не сохранена или отправитель скрыт.\n"
-                        "Попробуй открыть карточку подарка в Telegram."
-                    )
-                await event.respond(msg, parse_mode="html",
-                                    link_preview=False, buttons=buttons)
-            except FloodWaitError as exc:
-                await event.respond(f"⏳ Telegram ограничил запросы на {exc.seconds} секунд.")
-            except Exception as exc:
-                log.warning("Gift origin unavailable for %s: %s", slug, exc)
-                await event.respond("❌ Не удалось прочитать историю этого подарка.")
-        elif cmd == "/owner":
-            slug = argument.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-            if not valid_gift_slug(slug):
-                await event.respond("Пример: /owner PlushPepe-123")
-                return
-            try:
-                details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
-                contact, history, host = await asyncio.wait_for(
-                    asyncio.gather(
-                        resolve_owner_contact(details.gift, details, user),
-                        resolve_original_participants(details.gift, details, user),
-                        hosted_profile(details.gift, details, user),
-                    ),
-                    timeout=5.0,
-                )
-                extras = {"original_participants": history, "hosted_profile": host}
-                related = hosted_lines(extras) + origin_lines(extras)
-                buttons = [[Button.url("🎁 Открыть NFT", f"https://t.me/nft/{slug}")]]
-                buttons.extend(original_buttons(history, Button.url))
-                if host and host.get("url"):
-                    buttons.append([Button.url("🏷 Профиль, показывающий NFT", host["url"])])
-                url = contact.get("owner_profile_url")
-                if contact.get("owner_type") == "user" and url:
-                    buttons.insert(1, [Button.url(
-                        "✉️ Чат владельца" if contact.get("owner_url")
-                        else "👤 Профиль владельца по ID", url,
-                    )])
-                    owner_line = (
-                        f'✅ <a href="{html.escape(url, quote=True)}">'
-                        f'{html.escape(contact["owner_label"])}</a>\n'
-                    )
-                    if not contact.get("owner_url"):
-                        owner_line += "⚠️ Ссылка по ID может не открыться из-за приватности.\n"
-                else:
-                    owner_line = (
-                        f"🔐 {html.escape(contact.get('owner_label') or 'Не раскрыт')}\n"
-                        "Текущий Telegram-профиль не раскрыт в данных NFT.\n"
-                    )
-                await event.respond(
-                    f"🔎 <b>Автоматический поиск контактов {html.escape(slug)}</b>\n\n"
-                    f"👤 <b>Текущий владелец</b>\n{owner_line}\n"
-                    f"{related or '📜 Других публичных контактов нет.'}\n"
-                    "Исторический отправитель, получатель и профиль, показывающий "
-                    "подарок, НЕ обязательно являются его нынешним владельцем.\n"
-                    "🛒 Проверить покупку: /deal " + html.escape(slug),
-                    parse_mode="html", link_preview=False, buttons=buttons,
-                )
-            except FloodWaitError as exc:
-                await event.respond(f"⏳ Telegram ограничил запросы на {exc.seconds} секунд.")
-            except Exception as exc:
-                log.warning("Owner contact lookup failed for %s: %s", slug, exc)
-                await event.respond("❌ Не удалось проверить публичные контакты NFT.")
-        elif cmd == "/offer":
-            args = argument.split()
-            # Allow either a direct slug or a copied Telegram NFT link.
-            slug = args[0].split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] if args else ""
-            if not re.fullmatch(r"[A-Za-z0-9]+-[0-9]+", slug):
-                await event.respond("Пример: /offer PlushPepe-123 1500\nИли: /offer PlushPepe-123")
-                return
-            amount = None
-            if len(args) > 1:
-                if not args[1].isdigit() or not 1 <= int(args[1]) <= 1_000_000_000:
-                    await event.respond("Укажи сумму звёзд положительным целым числом.")
-                    return
-                amount = int(args[1])
-            try:
-                details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
-                unique = details.gift
-                contact = await resolve_owner_contact(unique, details, user)
-                minimum = contact.get("offer_min_stars")
-                if amount is not None and minimum is not None and amount < minimum:
-                    await event.respond(
-                        f"⚠️ Минимальный официальный оффер: {minimum} ⭐. "
-                        "Попробуй другую сумму."
-                    )
-                    return
-                draft = html.escape(offer_text(unique, amount))
-                url = contact.get("owner_profile_url") or contact.get("owner_url")
-                peer_kind = contact.get("owner_type")
-                buttons = [[Button.url("🎁 Открыть NFT / оффер", f"https://t.me/nft/{slug}")]]
-                if url and peer_kind == "user":
-                    label = "✉️ Открыть чат владельца" if contact.get("owner_url") else "👤 Открыть профиль по ID"
-                    buttons.append([Button.url(label, url)])
-                if peer_kind == "user" and contact.get("owner_url"):
-                    note = "Ссылка на публичный чат пользователя — можно написать лично."
-                elif peer_kind == "user" and contact.get("owner_user_id"):
-                    note = (
-                        f"Telegram ID владельца: {contact['owner_user_id']}. "
-                        "Ссылка на профиль по ID может не работать из-за ограничений Telegram."
-                    )
-                else:
-                    note = (
-                        "Прямой контакт Telegram не раскрыт. "
-                        "Проверь наличие официального оффера на странице NFT."
-                    )
-                await event.respond(
-                    "📝 <b>Сообщение для продавца</b>\n"
-                    f"<code>{draft}</code>\n\n"
-                    f"👤 Владелец сейчас: {html.escape(contact['owner_label'])}\n"
-                    f"💰 Мин. оффер: {minimum if minimum is not None else 'не указан'} ⭐\n"
-                    f"{note}\n\n"
-                    "Сообщение не отправлено: скопируй его и реши сам, писать ли человеку.",
-                    parse_mode="html", link_preview=False, buttons=buttons,
-                )
-            except FloodWaitError as exc:
-                await event.respond(f"⏳ Telegram ограничил запросы: {exc.seconds} сек.")
-            except Exception as exc:
-                log.warning("Cannot prepare offer for %s: %s", slug, exc)
-                await event.respond(
-                    "❌ Не удалось получить актуальные сведения о владельце "
-                    f"этого NFT: {html.escape(type(exc).__name__)}",
-                    parse_mode="html",
-                )
-        elif cmd == "/all":
-            value = argument.lower()
-            if value in {"on", "off"}:
-                state.data["notify_all_nfts"] = value == "on"
-                state.save()
-                await event.respond(
-                    "🔔 Отныне оповещаю о КАЖДОМ обнаруженном улучшенном NFT."
-                    if value == "on" else
-                    "💎 Отныне оповещаю только о редких моделях (до порога или Epic/Legendary)."
-                )
-            else:
-                await event.respond(
-                    f"🔔 Режим: {'все NFT' if all_nft_notifications() else 'только редкие'}."
-                    " Команды: /all on или /all off"
-                )
         elif cmd == "/last":
-            recent = state.data["history"][-10:]
+            recent = [
+                item for item in reversed(state.data.get("history") or [])
+                if item.get("kind") in {"new_nft", "rare_nft"}
+                and recipient_from_history(item.get("original_participants"))
+            ][:10]
             if not recent:
-                await event.respond("Пока новых апгрейдов не обнаружено.")
-            else:
-                lines = ["🗂 <b>Последние события</b>"]
-                for x in reversed(recent):
-                    if x["kind"] in {"rare_nft", "new_nft"}:
-                        icon = "💎" if x["kind"] == "rare_nft" else "🎁"
-                        lines.append(f"{icon} {html.escape(x['title'])} #{x['number']} — {x['model_rarity']}")
-                    else:
-                        lines.append(f"• {html.escape(x['title'])}: {x['upgrade_stars']}⭐ — {x['created_at']}")
-                await event.respond("\n".join(lines), parse_mode="html")
-        elif cmd == "/preview":
-            # A stand-alone live preview smoke test, without touching
-            # NFT baselines or persistent outgoing notifications.
-            slug = argument.strip().split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-            if not valid_gift_slug(slug):
-                await event.respond("Пример: /preview PartySparkler-189558")
+                await event.respond("Подходящих подарков пока нет.")
                 return
-            gift_url = f"https://t.me/nft/{slug}"
-            try:
-                await bot.send_message(
-                    event.sender_id,
-                    f"🎁 <b>Проверка превью NFT</b>\n\n"
-                    f"{gift_url}\n\n"
-                    "Карточку с изображением формирует сам Telegram.",
-                    parse_mode="html",
-                    link_preview=True,
-                    buttons=[[Button.url("🎁 Открыть подарок", gift_url)]],
+            rows = ["<b>Последние подарки</b>"]
+            for item in recent:
+                slug = html.escape(item["slug"], quote=True)
+                title = html.escape(str(item.get("title") or "NFT"))
+                recipient = recipient_from_history(item["original_participants"])
+                name = html.escape(recipient.get("label") or "Получатель")
+                rows.append(
+                    f'<a href="https://t.me/nft/{slug}">'
+                    f'{title} #{html.escape(str(item.get("number") or "?"))}</a>'
+                    f" — {name}"
                 )
-            except FloodWaitError as exc:
-                await event.respond(f"⏳ Telegram ограничил отправку на {exc.seconds} сек.")
-            except Exception as exc:
-                log.warning("NFT preview test failed for %s: %s", slug, exc)
-                await event.respond(
-                    "❌ Не удалось отправить превью: "
-                    + html.escape(type(exc).__name__ + ": " + str(exc)[:120]),
-                    parse_mode="html",
-                )
-        elif cmd == "/testdelivery":
-            synthetic = {
-                "kind": "delivery_test",
-                "event_id": secrets.token_hex(16),
-                "title": "Проверка отправителя",
-                "created_at": now_utc(),
-            }
-            # Priority test: verifies that the dedicated sender really works,
-            # rather than just checking the bot's command handler.
-            state.data["pending"].insert(0, synthetic)
-            state.save()
-            await deliver_pending(bot)
-            await event.respond(
-                "📤 Проверка поставлена в очередь. Ожидай отдельное "
-                "уведомление «ПРОВЕРКА ОЧЕРЕДИ УСПЕШНА». "
-                "Если его нет, отправь /delivery."
-            )
-        elif cmd == "/test":
-            await event.respond("✅ Тестовое уведомление: бот умеет отправлять сообщения.")
+            await event.respond("\n".join(rows), parse_mode="html",
+                                link_preview=False)
         elif cmd == "/pause":
             state.set_paused(True)
-            # Pause = skip alerts seen while paused; discard unsent queue too.
             state.data["pending"] = []
             state.save()
-            await event.respond("⏸ Уведомления остановлены. Мониторинг продолжает запоминать изменения.")
+            await event.respond("Уведомления выключены.")
         elif cmd == "/resume":
             state.set_paused(False)
-            await event.respond("▶️ Уведомления снова включены.")
+            await event.respond("Уведомления включены.")
             await deliver_pending(bot)
+        elif cmd == "/testdelivery":
+            # Hidden service command: test actual delivery outbox.
+            state.data["pending"].insert(0, {
+                "kind": "delivery_test",
+                "event_id": __import__("secrets").token_hex(16),
+                "title": "Test",
+                "created_at": now_utc(),
+            })
+            state.save()
+            await deliver_pending(bot)
+            await event.respond("Тест поставлен в очередь.")
+        elif cmd == "/activate":
+            if state.consume_activation_key(argument, event.sender_id):
+                await event.respond("Ключ активирован.")
+            elif state.data.get("activation_consumed"):
+                await event.respond("Ключ уже использован.")
+            else:
+                await event.respond("Неверный ключ.")
+        elif cmd == "/key":
+            await event.respond("Ключ: " + state.activation_status())
 
     try:
         log.info("Подключаем пользовательский MTProto-аккаунт...")
