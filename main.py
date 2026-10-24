@@ -5,8 +5,6 @@ import asyncio
 import html
 import logging
 import os
-import re
-import secrets
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -15,17 +13,14 @@ from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 
 from radar import Gift, RadarState, now_utc
-from mint_radar import collection_slug, extract_attributes, is_rare_model, make_event
+from mint_radar import extract_attributes, make_event
 from candidate_selection import get_candidates
-from owner_contact import owner_contact, resolve_owner_contact, offer_text
-from gift_origin import original_participants, resolve_original_participants, original_buttons
-from gift_host import hosted_profile
-from deal_watch import valid_gift_slug, deal_snapshot, deal_opportunities, deal_details
+from gift_origin import original_participants, resolve_original_participants
 from delivery import dispatch_next, fallback_text
 from scan_pacing import remaining_pause
 from recipient_filter import recipient_from_history, filter_pending
 from see_live import HEALTH as LIVE_HEALTH, run_stream
-from live_market import record_sale, estimate_listing, live_nft_notification, deal_notification
+from live_market import live_nft_notification
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -48,14 +43,10 @@ API_HASH = os.getenv("TELEGRAM_API_HASH") or os.getenv("API_HASH") or TEST_API_H
 BOT_TOKEN = required("BOT_TOKEN")
 SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 INTERVAL = max(15, int(os.getenv("CHECK_INTERVAL", "20")))
-NOTIFY_PRICE_CHANGES = os.getenv("NOTIFY_PRICE_CHANGES", "false").lower() in {"true", "yes", "1"}
 TRACK_RARE_NFTS = os.getenv("TRACK_RARE_NFTS", "true").lower() in {"true", "yes", "1"}
-NOTIFY_ALL_NFTS = os.getenv("NOTIFY_ALL_NFTS", "true").lower() in {"true", "yes", "1"}
 LIVE_ENABLED = os.getenv("LIVE_ENABLED", "true").lower() in {"true", "yes", "1"}
 LIVE_API_TOKEN = os.getenv("SEE_TG_API_TOKEN", "").strip()
 LIVE_NOTIFY_NEW = os.getenv("LIVE_NOTIFY_NEW", "true").lower() in {"true", "yes", "1"}
-LIVE_NOTIFY_BARGAINS = os.getenv("LIVE_NOTIFY_BARGAINS", "true").lower() in {"true", "yes", "1"}
-LIVE_BARGAIN_RATIO = min(0.95, max(0.10, float(os.getenv("LIVE_BARGAIN_RATIO", "0.75"))))
 LIVE_MAX_NEW_PER_MINUTE = max(0, min(60, int(os.getenv("LIVE_MAX_NEW_PER_MINUTE", "15"))))
 LIVE_COLLECTIONS = [x.strip() for x in os.getenv("LIVE_COLLECTIONS", "").split(",")
                     if x.strip() and x.strip().isalnum()]
@@ -68,17 +59,18 @@ NFT_REQUEST_SPACING_SECONDS = max(
 )
 COLLECTIONS_PER_CYCLE = max(1, int(os.getenv("COLLECTIONS_PER_CYCLE", "5")))
 MAX_NEW_NFTS_PER_CYCLE = max(1, int(os.getenv("MAX_NEW_NFTS_PER_CYCLE", "25")))
-MAX_MODEL_RARITY_PCT = float(os.getenv("MAX_MODEL_RARITY_PCT", "1.0"))
-DEAL_WATCH_INTERVAL = max(60, int(os.getenv("DEAL_WATCH_INTERVAL", "180")))
 GIFT_COLLECTIONS = [x.strip() for x in os.getenv("GIFT_COLLECTIONS", "").split(",") if x.strip()]
 # Bothost preserves /app/data during redeploys.
 DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if os.getenv("BOT_ID") else "data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 state = RadarState(DATA_DIR / "state.json")
 LIVE_COUNTERS = {
-    "new_notified": 0, "new_skipped_limit": 0, "deals_notified": 0,
-    "sales_recorded": 0, "last_new": None, "minute_bucket": None,
-    "minute_count": 0, "last_listing": None, "filtered_no_recipient": 0,
+    "new_notified": 0,
+    "new_skipped_limit": 0,
+    "filtered_no_recipient": 0,
+    "minute_bucket": None,
+    "minute_count": 0,
+    "last_new": None,
 }
 DELIVERY_WAKE = asyncio.Event()
 DELIVERY_STATS = {
@@ -94,177 +86,46 @@ DELIVERY_STATS = {
 }
 
 
-def hosted_lines(item: dict) -> str:
-    host = item.get("hosted_profile")
-    if not isinstance(host, dict) or not host.get("url"):
-        return ""
-    url = html.escape(host["url"], quote=True)
-    label = html.escape(host.get("label") or "Публичный профиль")
-    return (
-        f'🏷 Публично показывает подарок: <a href="{url}">{label}</a>\n'
-        "ℹ️ Это профиль-хост, не доказательство владения NFT.\n"
-    )
-
-
-def origin_lines(item: dict) -> str:
-    parts = item.get("original_participants") or []
-    if not parts:
-        return ""
-    display = []
-    for p in parts:
-        role = ("Первоначально подарил" if p["role"] == "sender"
-                else "Первоначально получил")
-        label = html.escape(str(p.get("label") or "Неизвестно"))
-        url = p.get("url")
-        if url:
-            label = f'<a href="{html.escape(url, quote=True)}">{label}</a>'
-        display.append(f"📜 {role}: {label}\n")
-    display.append("ℹ️ Это история подарка, НЕ подтверждение нынешнего владельца.\n")
-    return "".join(display)
-
-
-def market_deal_message(item: dict) -> str:
-    url = f"https://t.me/nft/{item['slug']}"
-    seller_url = item.get("seller_url")
-    seller = (
-        f'<a href="{html.escape(seller_url, quote=True)}">'
-        f'{html.escape(item.get("seller_label") or "Публичный продавец")}</a>'
-        if seller_url else "не указан в публичных данных"
-    )
-    return (
-        "📉 <b>ВОЗМОЖНО ВЫГОДНЫЙ NFT-ЛИСТИНГ</b>\n\n"
-        f"{url}\n\n"
-        f"🎁 <b>{html.escape(item['title'])} #{item['number']}</b>\n"
-        f"🎭 Модель: {html.escape(item.get('model', '?'))}\n"
-        f"🏪 Площадка: {html.escape(item['market'])}\n"
-        f"💰 Цена: <b>{html.escape(item['price_display'])}</b>\n"
-        f"📊 На {item['discount_pct']:g}% ниже медианы наблюдаемых продаж\n"
-        f"📉 Медиана: {item['median_ton']:g} TON "
-        f"(n={item['sample_size']}; {html.escape(item['comparison_scope'])})\n"
-        f"👤 Публичный продавец: {seller}\n\n"
-        "⚠️ Предварительный сигнал, НЕ гарантия прибыли. "
-        "Комиссии, ликвидность и редкость этого NFT не учтены.\n"
-        "🛒 Открой подарок и проверь актуальную цену."
-    )
-
-
-def recipient_highlight(item: dict) -> str:
-    recipient = recipient_from_history(item.get("original_participants"))
-    if not recipient:
-        return ""
-    name = html.escape(str(recipient.get("label") or "Telegram-получатель"))
-    url = html.escape(recipient["url"], quote=True)
-    return (
-        f'📥 <b>Кому подарили:</b> <a href="{url}">{name}</a>\n'
-        "ℹ️ Первый получатель, не обязательно текущий владелец.\n"
-    )
-
-
 def message_for_gift(item: dict) -> str:
-    if item.get("kind") == "market_deal":
-        return market_deal_message(item)
+    """Small, consistent Telegram message. The first URL is the NFT preview."""
     if item.get("kind") == "delivery_test":
-        return ("✅ <b>ПРОВЕРКА ОЧЕРЕДИ УСПЕШНА</b>\n"
-                "Сообщение прошло через независимый отправитель NFT Radar, "
-                "а не через ответ на команду.")
-    title = html.escape(item["title"])
-    if item["kind"] in {"rare_nft", "new_nft"}:
-        link = f"https://t.me/nft/{item['slug']}"
-        headline = (
-            "💎 <b>ЗАСЕЧЁН РЕДКИЙ NFT!</b>"
-            if item["kind"] == "rare_nft"
-            else "🎁 <b>НОВЫЙ NFT ПОСЛЕ УЛУЧШЕНИЯ</b>"
-        )
-        owner = html.escape(item.get("owner_label") or "Не раскрыт")
-        owner_url = item.get("owner_profile_url") or item.get("owner_url")
-        if owner_url:
-            owner_display = (
-                f'<a href="{html.escape(owner_url, quote=True)}">{owner}</a>'
-            )
-        else:
-            owner_display = owner
-        offer_min = item.get("offer_min_stars")
-        offer_line = (
-            f"💰 Официальный оффер: от {offer_min} ⭐"
-            if isinstance(offer_min, int) else
-            "💰 Оффер: проверь доступность в Telegram"
-        )
-        has_public_username = bool(item.get("owner_url") and item.get("owner_type") == "user")
-        has_id_mention = bool(item.get("owner_user_id") and not has_public_username)
-        contact_note = (
-            "✉️ Нажми «Открыть чат владельца» ниже."
-            if has_public_username else
-            "✉️ Доступна попытка открыть профиль через Telegram ID; ссылка может не работать из-за приватности."
-            if has_id_mention else
-            "🔐 Прямой контакт не раскрыт; проверь NFT и официальный оффер."
-        )
-        id_line = (
-            f"🆔 Telegram ID: <code>{int(item['owner_user_id'])}</code>\n"
-            if item.get("owner_user_id") else ""
-        )
-        return (
-            f"{headline}\n\n"
-            f"{link}\n\n"  # First URL in message: Telegram renders the gift card preview.
-            f"🎁 <b>{title} #{item['number']}</b>\n"
-            f"{recipient_highlight(item)}"
-            f"🔥 Модель: <b>{html.escape(item['model'])}</b> "
-            f"({html.escape(item['model_rarity'])})\n"
-            f"🎨 Фон: {html.escape(item['backdrop'])} "
-            f"({html.escape(item['backdrop_rarity'])})\n"
-            f"✳️ Символ: {html.escape(item['pattern'])} "
-            f"({html.escape(item['pattern_rarity'])})\n"
-            f"👤 Владелец: {owner_display}\n"
-            f"{hosted_lines(item)}"
-            f"{origin_lines(item)}"
-            f"{id_line}"
-            f"{offer_line}\n"
-            f"{contact_note}\n"
-            f"📝 Черновик: <code>/offer {html.escape(item['slug'])}</code>\n"
-            f"🔎 Способы покупки: <code>/deal {html.escape(item['slug'])}</code>\n"
-            f"🔔 Следить за продажей: <code>/watch {html.escape(item['slug'])}</code>\n"
-            f"🕒 Обнаружен: {html.escape(item['created_at'])} UTC\n\n"
-            "Проверь актуального владельца перед покупкой: подарок могли передать."
-        )
-    stars = item["upgrade_stars"]
-    kind = item["kind"]
-    if kind == "upgrade_unlocked":
-        headline = "🚨 <b>ОТКРЫЛСЯ АПГРЕЙД!</b>"
-    elif kind == "new_upgradable_gift":
-        headline = "🎁 <b>Новый подарок с апгрейдом!</b>"
+        return "Проверка доставки\nСообщение отправлено."
+
+    title = html.escape(str(item.get("title") or "NFT"))
+    number = html.escape(str(item.get("number") or "?"))
+    slug = str(item["slug"])
+    nft_link = f"https://t.me/nft/{slug}"
+    recipient = recipient_from_history(item.get("original_participants"))
+    if recipient:
+        name = html.escape(str(recipient.get("label") or "Получатель"))
+        url = str(recipient.get("url") or "")
+        if url.startswith("https://t.me/"):
+            name = f'<a href="{html.escape(url, quote=True)}">{name}</a>'
+        elif recipient.get("id"):
+            name += f" (ID {recipient['id']})"
+        recipient_line = f"Кому подарили: {name}"
     else:
-        headline = "📈 <b>Изменилась цена улучшения!</b>"
-    msg = (
-        f"{headline}\n\n"
-        f"🎁 <b>{title}</b>\n"
-        f"✨ Улучшение: <b>{stars} ⭐</b>\n"
-        f"🆔 Gift ID: <code>{item['gift_id']}</code>"
-    )
-    if kind == "upgrade_price_changed":
-        msg += f"\n⏮ Было: {item['previous_price']} ⭐"
-    msg += "\n\nПроверь подарок в Telegram → Настройки → Подарки."
-    return msg
+        # Should never enter the automatic queue, but tolerate historical data.
+        recipient_line = "Получатель не указан"
+
+    fields = [f"<b>{title} #{number}</b>", nft_link, recipient_line]
+    for label, field in (("Модель", "model"), ("Фон", "backdrop"),
+                         ("Символ", "pattern")):
+        value = str(item.get(field) or "").strip()
+        if value and value != "?":
+            fields.append(f"{label}: {html.escape(value)}")
+    return "\n\n".join((fields[0], fields[1])) + "\n\n" + "\n".join(fields[2:])
 
 
 def nft_buttons(item: dict):
-    if item.get("kind") not in {"rare_nft", "new_nft", "market_deal"}:
+    if item.get("kind") not in {"new_nft", "rare_nft"}:
         return None
-    buttons = [
-        [Button.url("🎁 Открыть NFT / оффер", f"https://t.me/nft/{item['slug']}")]
-    ]
-    # MTProto exposes a PeerUser ID even when the owner has no username.
-    # tg://user?id is a *conditional* Bot API mention; privacy and client
-    # user-cache restrictions may prevent it from opening a profile.
-    if item.get("owner_type") == "user":
-        if item.get("owner_url"):
-            buttons.append([Button.url("✉️ Открыть чат владельца", item["owner_url"])])
-        elif item.get("owner_profile_url"):
-            buttons.append([Button.url("👤 Открыть профиль по ID", item["owner_profile_url"])])
-    if item.get("kind") == "market_deal" and item.get("seller_url"):
-        buttons.append([Button.url("✉️ Публичный продавец", item["seller_url"])])
-    buttons.extend(original_buttons(item.get("original_participants") or [], Button.url))
-    host = item.get("hosted_profile")
-    if isinstance(host, dict) and host.get("url"):
-        buttons.append([Button.url("🏷 Профиль, показывающий NFT", host["url"])])
+    buttons = [[Button.url("Открыть подарок", f"https://t.me/nft/{item['slug']}")]]
+    recipient = recipient_from_history(item.get("original_participants"))
+    if recipient:
+        url = str(recipient.get("url") or "")
+        if url.startswith("https://t.me/"):
+            buttons.append([Button.url("Профиль получателя", url)])
     return buttons
 
 
@@ -272,7 +133,7 @@ async def send_alert(bot: TelegramClient, chat_id: int, text: str, item: dict | 
     item = item or {}
     # Telegram's webpage preview requires both an actual URL in message
     # text and link_preview=True. A URL button alone produces no preview.
-    show_gift_preview = item.get("kind") in {"new_nft", "rare_nft", "market_deal"}
+    show_gift_preview = item.get("kind") in {"new_nft", "rare_nft"}
     await bot.send_message(
         chat_id, text, parse_mode="html", link_preview=show_gift_preview,
         buttons=nft_buttons(item),
@@ -311,7 +172,7 @@ async def delivery_worker(bot: TelegramClient) -> None:
                 await bot.send_message(
                     state.owner_id,
                     fallback_text(item),
-                    link_preview=item.get("kind") in {"new_nft", "rare_nft", "market_deal"},
+                    link_preview=item.get("kind") in {"new_nft", "rare_nft"},
                 )
 
             result, item = await asyncio.wait_for(
@@ -378,11 +239,6 @@ NFT_HEALTH = {
 }
 # Avoid retrying an invalid slug every minute. This cache is process-local.
 UNRESOLVED_UNTIL: dict[str, float] = {}
-
-
-def all_nft_notifications() -> bool:
-    """Persistent on/off mode controlled by the authorized bot owner."""
-    return bool(state.data.get("notify_all_nfts", NOTIFY_ALL_NFTS))
 
 
 def nft_candidates() -> list[tuple[str, int | None]]:
@@ -520,51 +376,32 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                             collectible = details.gift
                             # Crafting has its own minting process; the radar tracks upgrades.
                             if not getattr(collectible, "crafted", False):
-                                initial_history = original_participants(collectible, details)
-                                if recipient_from_history(initial_history):
-                                    attrs = extract_attributes(collectible)
-                                    rare = is_rare_model(attrs, MAX_MODEL_RARITY_PCT)
-                                    event = make_event(collectible, attrs, now_utc(), rare=rare)
-                                    # Owner lookup must never stall mint scanning.
-                                    # Parallel public-link lookups, bounded by one
-                                    # timeout. Historical people are never treated
-                                    # as the current gift holder.
+                                history = original_participants(collectible, details)
+                                if recipient_from_history(history):
                                     try:
-                                        lookup = await asyncio.wait_for(
-                                            asyncio.gather(
-                                                resolve_owner_contact(collectible, details, user),
-                                                resolve_original_participants(collectible, details, user),
-                                                hosted_profile(collectible, details, user),
-                                            ),
-                                            timeout=3.5,
+                                        enriched = await asyncio.wait_for(
+                                            resolve_original_participants(
+                                                collectible, details, user
+                                            ), timeout=2.5
                                         )
-                                        contact, history, hosted = lookup
-                                    except Exception as exc:
-                                        log.debug("Public contact lookup delayed for %s: %s", collectible.slug, exc)
-                                        contact = owner_contact(collectible, details)
-                                        history = original_participants(collectible, details)
-                                        hosted = None
-                                    event.update(contact)
+                                        if recipient_from_history(enriched):
+                                            history = enriched
+                                    except (asyncio.TimeoutError, Exception):
+                                        pass
+                                    attrs = extract_attributes(collectible)
+                                    event = make_event(
+                                        collectible, attrs, now_utc(), rare=False
+                                    )
                                     event["original_participants"] = history
-                                    if hosted:
-                                        event["hosted_profile"] = hosted
                                     NFT_HEALTH["total_new_nfts"] += 1
                                     NFT_HEALTH["last_nft"] = str(collectible.slug)
-                                    if rare:
-                                        NFT_HEALTH["total_rare_nfts"] += 1
-                                    if rare or all_nft_notifications():
-                                        if state.record_nft_once(event):
-                                            NFT_HEALTH["notified_nfts"] += 1
-                                            NFT_HEALTH["discovered"] += 1
-                                            NFT_HEALTH["last_found"] = now_utc()
-                                    log.info(
-                                        "NFT UPGRADE: %s | model=%s | rarity=%s | rare=%s | queued=%s",
-                                        collectible.slug, event["model"], event["model_rarity"],
-                                        rare, rare or all_nft_notifications(),
-                                    )
+                                    if state.record_nft_once(event):
+                                        NFT_HEALTH["notified_nfts"] += 1
+                                        NFT_HEALTH["discovered"] += 1
+                                        NFT_HEALTH["last_found"] = now_utc()
+                                        log.info("NEW GIFT %s (recipient visible)", collectible.slug)
                                 else:
                                     NFT_HEALTH["filtered_no_recipient"] += 1
-                                    log.debug("NFT skipped (no original recipient): %s", collectible.slug)
                             state.set_collection_issued(resolved, number)
                             await deliver_pending(bot)
                     except FloodWaitError:
@@ -621,7 +458,7 @@ async def monitor(user: TelegramClient, bot: TelegramClient) -> None:
                 raise RuntimeError("Telegram не прислал список подарков")
             gifts = [Gift.from_telegram(g) for g in result.gifts]
             NFT_HEALTH["last_catalog"] = now_utc()
-            new_events = state.update_gifts(gifts, NOTIFY_PRICE_CHANGES)
+            new_events = state.update_gifts(gifts, notify=False)
             if new_events:
                 log.info("Обнаружено новых событий: %d", len(new_events))
             else:
@@ -637,123 +474,52 @@ async def monitor(user: TelegramClient, bot: TelegramClient) -> None:
 
 
 async def live_market_event(event: dict, user: TelegramClient | None = None) -> None:
-    """No paid see.tg REST calls, wallet actions or automated purchases."""
+    """Verify the historical recipient in Telegram before notifying."""
+    if event.get("type") != "new" or user is None or not LIVE_NOTIFY_NEW:
+        return
     if LIVE_COLLECTIONS and event["collection"] not in LIVE_COLLECTIONS:
         return
-    if event["type"] == "sale":
-        if record_sale(state.data, event):
-            LIVE_COUNTERS["sales_recorded"] += 1
-            state.save()
+    minute = int(asyncio.get_running_loop().time() // 60)
+    if LIVE_COUNTERS["minute_bucket"] != minute:
+        LIVE_COUNTERS["minute_bucket"] = minute
+        LIVE_COUNTERS["minute_count"] = 0
+    if LIVE_COUNTERS["minute_count"] >= LIVE_MAX_NEW_PER_MINUTE:
+        LIVE_COUNTERS["new_skipped_limit"] += 1
         return
-
-    if event["type"] == "new" and LIVE_NOTIFY_NEW and all_nft_notifications():
-        minute = int(asyncio.get_running_loop().time() // 60)
-        if LIVE_COUNTERS["minute_bucket"] != minute:
-            LIVE_COUNTERS["minute_bucket"] = minute
-            LIVE_COUNTERS["minute_count"] = 0
-        if LIVE_COUNTERS["minute_count"] >= LIVE_MAX_NEW_PER_MINUTE:
-            LIVE_COUNTERS["new_skipped_limit"] += 1
+    try:
+        details = await user(
+            functions.payments.GetUniqueStarGiftRequest(slug=event["slug"])
+        )
+        collectible = details.gift
+        if (getattr(collectible, "crafted", False)
+                or str(getattr(collectible, "slug", "")).lower() != event["slug"].lower()):
             return
-        if user is None:
-            log.debug("Live %s ignored: MTProto session unavailable for recipient verification", event["slug"])
+        history = original_participants(collectible, details)
+        if not recipient_from_history(history):
+            LIVE_COUNTERS["filtered_no_recipient"] += 1
             return
         try:
-            details = await user(
-                functions.payments.GetUniqueStarGiftRequest(slug=event["slug"])
+            enriched = await asyncio.wait_for(
+                resolve_original_participants(collectible, details, user),
+                timeout=2.5,
             )
-            collectible = details.gift
-            if getattr(collectible, "crafted", False) or str(collectible.slug).lower() != event["slug"].lower():
-                return
-            initial_history = original_participants(collectible, details)
-            if not recipient_from_history(initial_history):
-                LIVE_COUNTERS["filtered_no_recipient"] += 1
-                return
-            # The historical recipient is required before queuing an alert.
-            try:
-                history = await asyncio.wait_for(
-                    resolve_original_participants(collectible, details, user),
-                    timeout=2.0,
-                )
-                if not recipient_from_history(history):
-                    history = initial_history
-            except Exception:
-                history = initial_history
-            alert = live_nft_notification(event)
-            alert["original_participants"] = history
-            alert.update(owner_contact(collectible, details))
-            if state.record_nft_once(alert):
-                LIVE_COUNTERS["minute_count"] += 1
-                LIVE_COUNTERS["new_notified"] += 1
-                LIVE_COUNTERS["last_new"] = now_utc()
-                log.info("LIVE GIFT WITH RECIPIENT %s queued=%d",
-                         event["slug"], len(state.data["pending"]))
-                await deliver_pending(None)
-        except FloodWaitError as exc:
-            log.warning("Live recipient check rate-limited for %s: %ds", event["slug"], exc.seconds)
-        except Exception as exc:
-            log.debug("Live recipient verification failed for %s: %s",
-                      event["slug"], type(exc).__name__)
-        return
-
-    if event["type"] in {"listing", "price"}:
-        listings = state.data.setdefault("live_last_listings", {})
-        listings[event["slug"]] = {"event": event, "observed_at": now_utc()}
-        while len(listings) > 300:
-            del listings[next(iter(listings))]
-        LIVE_COUNTERS["last_listing"] = now_utc()
-        # Price history remains available to /value; no automatic
-        # listings or deal messages in recipient-only mode.
-        return
-
-
-async def fetch_deal_snapshot(user: TelegramClient, slug: str) -> dict:
-    if not valid_gift_slug(slug):
-        raise ValueError("Неправильный номер NFT")
-    details = await user(functions.payments.GetUniqueStarGiftRequest(slug=slug))
-    contact = await resolve_owner_contact(details.gift, details, user)
-    return deal_snapshot(details.gift, contact)
-
-
-def deal_watch_buttons(slug: str, snapshot: dict):
-    buttons = [[Button.url("🎁 Открыть NFT / покупка", f"https://t.me/nft/{slug}")]]
-    link = snapshot.get("owner_url") or snapshot.get("owner_profile_url")
-    if link and snapshot.get("owner_type") == "user":
-        buttons.append([Button.url("👤 Профиль владельца", link)])
-    return buttons
-
-
-async def monitor_deals(user: TelegramClient, bot: TelegramClient) -> None:
-    """Watch manually selected gifts for a newly available legitimate trade path."""
-    while True:
-        watchlist = dict(state.data.get("deal_watchlist") or {})
-        for slug, previous in watchlist.items():
-            try:
-                current = await fetch_deal_snapshot(user, slug)
-                if slug not in state.data.get("deal_watchlist", {}):
-                    continue
-                changes = deal_opportunities(previous, current)
-                if changes and not state.data.get("paused") and state.owner_id is not None:
-                    description = "\n".join("• " + html.escape(x) for x in changes)
-                    await bot.send_message(
-                        state.owner_id,
-                        f"🚨 <b>Появился способ купить NFT!</b>\n"
-                        f"🎁 <a href=\"https://t.me/nft/{html.escape(slug, quote=True)}\">"
-                        f"{html.escape(slug)}</a>\n"
-                        f"{description}\n\n"
-                        f"{html.escape(deal_details(current))}",
-                        parse_mode="html",
-                        link_preview=False,
-                        buttons=deal_watch_buttons(slug, current),
-                    )
-                state.data["deal_watchlist"][slug] = current
-                state.save()
-            except FloodWaitError as exc:
-                log.warning("Deal watch: Telegram FloodWait %d seconds", exc.seconds)
-                await asyncio.sleep(exc.seconds + 3)
-            except Exception as exc:
-                log.warning("Deal watch failed for %s: %s", slug, exc)
-            await asyncio.sleep(0.25)
-        await asyncio.sleep(DEAL_WATCH_INTERVAL)
+            if recipient_from_history(enriched):
+                history = enriched
+        except Exception:
+            pass
+        alert = live_nft_notification(event)
+        alert["original_participants"] = history
+        if state.record_nft_once(alert):
+            LIVE_COUNTERS["minute_count"] += 1
+            LIVE_COUNTERS["new_notified"] += 1
+            LIVE_COUNTERS["last_new"] = now_utc()
+            log.info("LIVE GIFT %s (recipient visible)", event["slug"])
+            await deliver_pending(None)
+    except FloodWaitError as exc:
+        log.warning("LIVE recipient verification delayed by %ds", exc.seconds)
+    except Exception as exc:
+        log.debug("LIVE verification failed %s: %s",
+                  event["slug"], type(exc).__name__)
 
 
 def command_name(text: str) -> tuple[str, str]:
@@ -1322,8 +1088,7 @@ async def run() -> None:
                 state.owner_id, state.activation_status()
             )
         tasks = [asyncio.create_task(delivery_worker(bot)),
-                 asyncio.create_task(monitor(user, bot)),
-                 asyncio.create_task(monitor_deals(user, bot))]
+                 asyncio.create_task(monitor(user, bot))]
         if LIVE_ENABLED:
             tasks.append(asyncio.create_task(
                 run_stream(lambda event: live_market_event(event, user),
