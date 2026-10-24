@@ -128,9 +128,14 @@ def nft_buttons(item: dict):
     if item.get("kind") not in {"new_nft", "rare_nft"}:
         return None
     buttons = [[Button.url("Открыть подарок", f"https://t.me/nft/{item['slug']}")]]
-    url = profile_url(item.get("owner"))
-    if url:
-        buttons.append([Button.url("Профиль владельца", url)])
+    # Intentionally use the ORIGINAL gift recipient for this optional
+    # profile shortcut, not current ownership. Keep displayed owner text as-is.
+    recipient = recipient_from_history(item.get("original_participants"))
+    if recipient:
+        url = str(recipient.get("url") or "")
+        if (url.startswith("https://t.me/") or
+                url.startswith("tg://user?id=")):
+            buttons.append([Button.url("Профиль", url)])
     return buttons
 
 
