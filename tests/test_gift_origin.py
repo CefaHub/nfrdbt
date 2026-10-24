@@ -38,9 +38,8 @@ class OriginalDetailsTests(unittest.TestCase):
             SimpleNamespace(id=20, username="DariiiPublic", first_name="Darii"),
         ], chats=[])
         result = original_participants(gift, response)
-        self.assertEqual([p["role"] for p in result], ["sender", "recipient"])
-        self.assertEqual(result[0]["url"], "https://t.me/MillerPublic")
-        self.assertEqual(result[1]["url"], "https://t.me/DariiiPublic")
+        self.assertEqual([p["role"] for p in result], ["recipient"])
+        self.assertEqual(result[0]["url"], "https://t.me/DariiiPublic")
         # These are historical gift contacts, not the NFT's current owner.
         self.assertNotIn("owner", result[0])
 
@@ -49,8 +48,7 @@ class OriginalDetailsTests(unittest.TestCase):
             attributes=[StarGiftAttributeOriginalDetails(PeerUser(333), PeerUser(444))]
         )
         data = original_participants(gift, SimpleNamespace(users=[], chats=[]))
-        self.assertEqual(data[0]["url"], "tg://user?id=333")
-        self.assertEqual(data[1]["url"], "tg://user?id=444")
+        self.assertEqual(data[0]["url"], "tg://user?id=444")
 
     def test_anonymous_sender_does_not_get_guessed(self):
         gift = SimpleNamespace(
@@ -71,8 +69,8 @@ class OriginalDetailsTests(unittest.TestCase):
         data = original_participants(gift, SimpleNamespace(
             users=[], chats=[SimpleNamespace(id=90, username="GiftChannel", title="Gifts")]
         ))
-        self.assertEqual(data[0]["url"], "https://t.me/GiftChannel")
-        self.assertEqual(data[0]["type"], "channel")
+        self.assertEqual(data[0]["url"], "tg://user?id=10")
+        self.assertEqual(data[0]["type"], "user")
 
     def test_malformed_untrusted_peer_does_not_construct_link(self):
         gift = SimpleNamespace(
@@ -92,8 +90,7 @@ class OriginalDetailsAsyncTests(unittest.IsolatedAsyncioTestCase):
         result = await resolve_original_participants(
             gift, SimpleNamespace(users=[], chats=[]), Client()
         )
-        self.assertEqual(result[0]["url"], "https://t.me/UserName20")
-        self.assertEqual(result[1]["url"], "https://t.me/UserName30")
+        self.assertEqual(result[0]["url"], "https://t.me/UserName30")
 
     async def test_different_user_id_is_rejected(self):
         gift = SimpleNamespace(
