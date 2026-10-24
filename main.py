@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 import html
 import logging
 import os
@@ -128,25 +129,92 @@ def message_for_gift(item: dict) -> str:
     return "\n\n".join((fields[0], fields[1])) + "\n\n" + "\n".join(fields[2:])
 
 
+def _private_profile_user_id(item: dict) -> int | None:
+    """A verified Telegram user ID from original gift history, not owner text."""
+    if item.get("kind") not in {"new_nft", "rare_nft"}:
+        return None
+    recipient = recipient_from_history(item.get("original_participants"))
+    if not recipient or recipient.get("type") != "user":
+        return None
+    user_id = recipient["id"]
+    # This case needs Bot API's native user-profile button, not an MTProto
+    # inputKeyboardButtonUrl. Normal Telegram clients can ignore ID URL links.
+    if recipient.get("url") == f"tg://user?id={user_id}":
+        return user_id
+    return None
+
+
 def nft_buttons(item: dict):
     if item.get("kind") not in {"new_nft", "rare_nft"}:
         return None
     buttons = [[Button.url("Открыть подарок", f"https://t.me/nft/{item['slug']}")]]
-    # Intentionally use the ORIGINAL gift recipient for this optional
-    # profile shortcut, not current ownership. Keep displayed owner text as-is.
+    # Keep ORIGINAL recipient button for public usernames. Telegram clients
+    # may ignore tg://user?id= in plain MTProto URL buttons; those are sent
+    # through Bot API as a proper user-profile button instead.
     recipient = recipient_from_history(item.get("original_participants"))
     if recipient:
         url = str(recipient.get("url") or "")
-        if (url.startswith("https://t.me/") or
-                url.startswith("tg://user?id=")):
+        if url.startswith("https://t.me/"):
             buttons.append([Button.url("Профиль", url)])
     return buttons
 
 
+def _private_profile_payload(chat_id: int, text: str, item: dict) -> dict:
+    """Payload to turn tg://user?id into keyboardButtonUserProfile via Bot API."""
+    user_id = _private_profile_user_id(item)
+    if user_id is None:
+        raise ValueError("There is no verified ID-only original recipient")
+    gift_url = f"https://t.me/nft/{item['slug']}"
+    return {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "link_preview_options": {"is_disabled": False, "url": gift_url},
+        "reply_markup": {"inline_keyboard": [
+            [{"text": "Открыть подарок", "url": gift_url}],
+            [{"text": "Профиль", "url": f"tg://user?id={user_id}"}],
+        ]},
+    }
+
+
+async def _send_private_profile_via_bot_api(
+    chat_id: int, text: str, item: dict
+) -> bool:
+    """Ask Bot API to build native profile button instead of a raw URL button.
+
+    Returns False only for explicit HTTP 400 errors (e.g. Telegram privacy
+    restrictions). Other failures propagate for retry without silently
+    dropping the NFT alert or potentially sending duplicates.
+    """
+    payload = _private_profile_payload(chat_id, text, item)
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json=payload, timeout=aiohttp.ClientTimeout(total=25),
+        ) as response:
+            result = await response.json(content_type=None)
+            if isinstance(result, dict) and result.get("ok") is True:
+                return True
+            if response.status == 400:
+                log.warning(
+                    "Telegram blocked an ID-only profile button; "
+                    "delivering gift without unopenable profile shortcut."
+                )
+                return False
+            # Avoid logging Bot API URL: it embeds BOT_TOKEN.
+            raise RuntimeError(
+                f"Bot API notification failed (HTTP {response.status})"
+            )
+
+
 async def send_alert(bot: TelegramClient, chat_id: int, text: str, item: dict | None = None) -> None:
     item = item or {}
-    # Telegram's webpage preview requires both an actual URL in message
-    # text and link_preview=True. A URL button alone produces no preview.
+    # Use the Bot API for a username-less recipient. The special tg://user
+    # URL is an abstraction supported by Bot API, not a normal MTProto URL.
+    # Telegram still controls whether a private user may be opened.
+    if _private_profile_user_id(item) is not None:
+        if await _send_private_profile_via_bot_api(chat_id, text, item):
+            return
     show_gift_preview = item.get("kind") in {"new_nft", "rare_nft"}
     await bot.send_message(
         chat_id, text, parse_mode="html", link_preview=show_gift_preview,
