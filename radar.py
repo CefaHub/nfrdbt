@@ -76,7 +76,7 @@ class RadarState:
             if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink()
 
-    def update_gifts(self, gifts: Iterable[Gift], notify_price_changes: bool = False) -> list[dict[str, Any]]:
+    def update_gifts(self, gifts: Iterable[Gift], notify_price_changes: bool = False, notify: bool = True) -> list[dict[str, Any]]:
         first_scan = not self.data["initialized"]
         current = self.data["gifts"]
         new_events: list[dict[str, Any]] = []
@@ -84,7 +84,7 @@ class RadarState:
         for gift in gifts:
             was_known = gift.gift_id in current
             old_price = current.get(gift.gift_id, {}).get("upgrade_stars")
-            if not first_scan and not self.data["paused"]:
+            if notify and not first_scan and not self.data["paused"]:
                 kind = None
                 if gift.upgrade_stars is not None and old_price is None:
                     kind = "upgrade_unlocked" if was_known else "new_upgradable_gift"
