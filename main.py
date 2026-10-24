@@ -6,6 +6,7 @@ import html
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -775,29 +776,42 @@ async def run() -> None:
         if sender != ADMIN_ID:
             if cmd in ("/start", "/join") and argument:
                 result = store.redeem(argument, sender)
-                if result == "activated":
+                info = store.license_info(sender)
+                if result in {"activated", "extended", "upgraded", "existing"}:
+                    if info and info["expires_at"] is not None:
+                        until = datetime.fromtimestamp(
+                            info["expires_at"], tz=timezone.utc
+                        ).strftime("%d.%m.%Y %H:%M UTC")
+                        plan = f"Доступ на 1 день. Активен до {until}."
+                    else:
+                        plan = "Бессрочный доступ активирован."
                     await event.respond(
-                        "Доступ к NFT-радару активирован! Новые находки "
-                        "будут приходить сюда автоматически.\n"
-                        "/status — состояние подписки\n"
+                        f"NFT Gift Radar подключён!\\n{plan}\\n"
+                        "Новые NFT будут приходить сюда автоматически.\\n"
+                        "/status — состояние подписки\\n"
                         "/stop — отключить уведомления."
                     )
-                elif result == "existing":
-                    await event.respond(
-                        "Доступ уже активирован, уведомления включены.\n"
-                        "/status — состояние подписки."
-                    )
+                    await deliver_pending(bot)
                 else:
                     await event.respond(
                         "Эта ссылка уже использована или недействительна. "
                         "Обратись к продавцу за новой ссылкой."
                     )
-                await deliver_pending(bot)
                 return
+
+            info = store.license_info(sender)
             if store.is_subscribed(sender):
                 if cmd in ("/start", "/status", "/help", "/ping"):
+                    if info["expires_at"] is None:
+                        plan = "Бессрочный доступ"
+                    else:
+                        until = datetime.fromtimestamp(
+                            info["expires_at"], tz=timezone.utc
+                        ).strftime("%d.%m.%Y %H:%M UTC")
+                        plan = f"Доступ на 1 день до {until}"
                     await event.respond(
-                        "NFT-радар активен. Новые подарки приходят автоматически.\n"
+                        f"NFT-радар активен. {plan}.\\n"
+                        "Новые подарки приходят автоматически.\\n"
                         "/stop — отключить уведомления."
                     )
                 elif cmd in ("/stop", "/leave"):
@@ -808,23 +822,34 @@ async def run() -> None:
                     )
                 else:
                     await event.respond("Эта команда недоступна.")
-            elif store.has_license(sender) and cmd == "/start":
-                store.reactivate(sender)
-                await event.respond("Уведомления снова включены.")
+            elif info and info["expired"]:
+                if cmd in ("/start", "/status", "/help", "/ping", "/join"):
+                    await event.respond(
+                        "Доступ на 1 день закончился. Уведомления отключены. "
+                        "Для продления или покупки бессрочного доступа "
+                        "активируй новую ссылку."
+                    )
+            elif info is not None:
+                if cmd == "/start" and store.reactivate(sender):
+                    await event.respond("Уведомления снова включены.")
+                    await deliver_pending(bot)
+                elif cmd in ("/status", "/help", "/ping"):
+                    await event.respond("Уведомления отключены. Отправь /start.")
             elif cmd in ("/start", "/status", "/help", "/ping", "/join"):
                 await event.respond(
                     "Это платный NFT-радар. Для активации открой "
                     "персональную ссылку, полученную после покупки."
                 )
-            # Anonymous customers never see another customer's username,
-            # numeric Telegram ID, invite tokens, or any admin menu.
+            # Other buyers never see anyone else's Telegram ID or purchases.
             return
 
         if cmd in ("/start", "/help", "/admin"):
             await event.respond(
                 "<b>Gift Radar — админ-панель</b>\n"
-                "/invite — создать ссылку на одного покупателя\n"
-                "/links 20 — создать партию из 20 ссылок (до 50 за запрос)\n"
+                "/invite — бессрочный доступ, 1 ссылка\n"
+                "/links 20 — бессрочный доступ, 20 ссылок\n"
+                "/invite1d — доступ на 1 день, 1 ссылка\n"
+                "/links1d 20 — доступ на 1 день, 20 ссылок\n"
                 "/stats — только общая статистика, без пользователей\n"
                 "/status — здоровье сканера и очереди\n"
                 "/pushall — перепроверить пропущенные NFT\n"
@@ -832,16 +857,18 @@ async def run() -> None:
                 "/last — последние NFT\n"
                 "/check ССЫЛКА — диагностика одного NFT\n"
                 "/pause /resume — пауза и возобновление\n"
-                "Ссылки одноразовые, без срока действия. "
-                "Общее количество покупателей и ссылок не ограничено кодом.",
+                "Ссылки одноразовые; 24 часа отсчитываются с момента "
+                "активации дневного доступа. "
+                "Количество покупателей и ссылок не ограничено кодом.",
                 parse_mode="html",
             )
-        elif cmd in ("/invite", "/links"):
+        elif cmd in ("/invite", "/links", "/invite1d", "/links1d"):
+            daily = cmd.endswith("1d")
             amount = 1
-            if cmd == "/links":
+            if cmd in ("/links", "/links1d"):
                 if not argument.isdecimal() or not 1 <= int(argument) <= 50:
                     await event.respond(
-                        "Формат: /links 20 (1–50 за одну команду; "
+                        f"Формат: {cmd} 20 (1–50 за одну команду; "
                         "общего лимита нет, можно повторять)."
                     )
                     return
@@ -851,13 +878,17 @@ async def run() -> None:
                 me = await bot.get_me()
                 username = me.username
                 bot_identity["username"] = username
-            codes = store.create_links(amount)
+            codes = store.create_links(amount, duration_days=1 if daily else None)
             links = [f"https://t.me/{username}?start={code}" for code in codes]
-            # Only the hardcoded admin receives inventory links.
+            heading = (
+                "ДОСТУП НА 1 ДЕНЬ — 24 часа с активации:"
+                if daily else "БЕССРОЧНЫЙ ДОСТУП:"
+            )
+            # Send inventories only to the hardcoded admin. Never cross-post
+            # a daily inventory to the lifetime-product auto-delivery SKU.
             for i in range(0, len(links), 40):
                 await event.respond(
-                    "Ссылки для автовыдачи (каждая на одного покупателя):\n"
-                    + "\n".join(links[i:i + 40]),
+                    heading + "\n" + "\n".join(links[i:i + 40]),
                     link_preview=False,
                 )
         elif cmd in ("/stats", "/linkstats", "/friends"):
@@ -866,8 +897,11 @@ async def run() -> None:
                 "<b>Статистика NFT-радара</b>\n"
                 f"Активных подписок: {st['active_users']}\n"
                 f"Всего активаций: {st['licensed_users'] - 1}\n"
-                f"Неиспользованных ссылок: {st['unused_links']}\n"
+                f"Неиспользованных бессрочных ссылок: {st['lifetime_links']}\n"
+                f"Неиспользованных однодневных ссылок: {st['trial_links']}\n"
                 f"Активированных ссылок: {st['redeemed_links']}\n"
+                f"Действующих дневных доступов: {st['trial_active']}\n"
+                f"Истёкших дневных доступов: {st['trial_expired']}\n"
                 f"Подписчиков с очередью: {st['pending_subscribers']}\n"
                 "Данные пользователей и их Telegram ID не отображаются.",
                 parse_mode="html",
@@ -980,7 +1014,8 @@ async def run() -> None:
             )
         elif cmd in ("/activate", "/key", "/remove"):
             await event.respond(
-                "Старая схема активации отключена. Используй /invite, /links и /stats."
+                "Старая схема активации отключена. Доступны /invite, /links, "
+                "/invite1d, /links1d и /stats."
             )
 
     try:
