@@ -1,102 +1,87 @@
-"""Validate message-level NFT previews without connecting to Telegram."""
+"""Message and Telegram preview regression tests for the minimal NFT radar."""
 import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-# main.py reads the bot token at import time; use a dummy value.
-os.environ.setdefault("BOT_TOKEN", "dummy-token-for-offline-tests")
-from main import message_for_gift, send_alert
+os.environ.setdefault("BOT_TOKEN", "offline-dummy-token")
+from main import message_for_gift, send_alert, nft_buttons
 from delivery import fallback_text
 
 
-def nft_item(kind: str = "new_nft") -> dict:
-    return {
-        "kind": kind,
-        "slug": "PartySparkler-189558",
-        "title": "Party Sparkler",
-        "number": 189558,
-        "model": "Wand",
-        "model_rarity": "2%",
-        "backdrop": "Meadow",
-        "backdrop_rarity": "8%",
-        "pattern": "Star",
-        "pattern_rarity": "1.4%",
-        "owner_label": "@PublicOwner",
-        "owner_type": "user",
-        "owner_url": "https://t.me/PublicOwner",
-        "owner_profile_url": "https://t.me/PublicOwner",
-        "created_at": "2026-10-24T00:00:00+00:00",
+def item(kind="new_nft", recipient=True):
+    data = {
+        "kind": kind, "slug": "PartySparkler-189558",
+        "title": "Party Sparkler", "number": 189558,
+        "model": "Wand", "backdrop": "Meadow",
+        "pattern": "Star", "created_at": "2026-10-24T00:00:00+00:00",
+        "original_participants": [
+            {"role": "sender", "type": "user", "id": 51,
+             "label": "@Sender51", "url": "https://t.me/Sender51"},
+        ],
     }
+    if recipient:
+        data["original_participants"].append({
+            "role": "recipient", "type": "user", "id": 72,
+            "label": "@Recipient72", "url": "https://t.me/Recipient72",
+        })
+    return data
 
 
-class PreviewTests(unittest.IsolatedAsyncioTestCase):
-    async def test_new_nft_contains_plain_url_first_and_enables_preview(self):
-        item = nft_item()
-        body = message_for_gift(item)
-        link = "https://t.me/nft/PartySparkler-189558"
-        self.assertIn(link, body)
-        self.assertLess(body.index(link), body.index("https://t.me/PublicOwner"))
+class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_message_has_precise_link_and_only_essential_fields(self):
+        gift = item()
+        text = message_for_gift(gift)
+        self.assertIn("<b>Party Sparkler #189558</b>", text)
+        self.assertIn("https://t.me/nft/PartySparkler-189558", text)
+        self.assertIn("Кому подарили:", text)
+        self.assertIn("https://t.me/Recipient72", text)
+        self.assertNotIn("https://t.me/Sender51", text)
+        self.assertNotIn("Черновик", text)
+        self.assertNotIn("/watch", text)
+        self.assertNotIn("Оффер", text)
+        self.assertNotIn("ПРОВЕРЬ", text)
+        self.assertNotIn("🔥", text)
+
         bot = SimpleNamespace(send_message=AsyncMock())
-        await send_alert(bot, 42, body, item)
+        await send_alert(bot, 42, text, gift)
         kwargs = bot.send_message.await_args.kwargs
-        self.assertTrue(kwargs["link_preview"])
         self.assertEqual(kwargs["parse_mode"], "html")
-        self.assertTrue(kwargs["buttons"])
-
-    async def test_rare_nft_uses_same_preview(self):
-        item = nft_item("rare_nft")
-        bot = SimpleNamespace(send_message=AsyncMock())
-        body = message_for_gift(item)
-        await send_alert(bot, 42, body, item)
-        self.assertTrue(bot.send_message.await_args.kwargs["link_preview"])
-        self.assertIn("https://t.me/nft/PartySparkler-189558", body)
-
-    async def test_historical_contacts_appear_in_nft_alert_not_as_owner(self):
-        item = nft_item()
-        item["owner_label"] = "Private Current Owner"
-        item["owner_type"] = "name"
-        item["owner_url"] = None
-        item["owner_profile_url"] = None
-        item["original_participants"] = [
-            {"role": "sender", "label": "@MillerPublic",
-             "url": "https://t.me/MillerPublic"},
-            {"role": "recipient", "label": "@DariiiPublic",
-             "url": "https://t.me/DariiiPublic"},
-        ]
-        msg = message_for_gift(item)
-        self.assertIn("Первоначально подарил", msg)
-        self.assertIn("Первоначально получил", msg)
-        self.assertIn("НЕ подтверждение нынешнего владельца", msg)
-        self.assertIn("Владелец: Private Current Owner", msg)
-        bot = SimpleNamespace(send_message=AsyncMock())
-        await send_alert(bot, 42, msg, item)
-        kwargs = bot.send_message.await_args.kwargs
         self.assertTrue(kwargs["link_preview"])
-        self.assertEqual(len(kwargs["buttons"]), 3)
-        self.assertIn("Кто подарил", kwargs["buttons"][1][0].text)
-        self.assertIn("Первый получатель", kwargs["buttons"][2][0].text)
+        self.assertEqual(len(kwargs["buttons"]), 2)
+        self.assertEqual(kwargs["buttons"][0][0].text, "Открыть подарок")
+        self.assertEqual(kwargs["buttons"][1][0].text, "Профиль получателя")
 
-    async def test_non_nft_message_does_not_show_link_preview(self):
-        item = {
-            "kind": "upgrade_unlocked",
-            "title": "New Gift",
-            "gift_id": "123",
-            "upgrade_stars": 25,
+    async def test_id_only_recipient_stays_in_text_without_invalid_url_button(self):
+        gift = item()
+        gift["original_participants"][-1] = {
+            "role": "recipient", "type": "user", "id": 72,
+            "label": "Telegram ID 72", "url": "tg://user?id=72",
         }
+        msg = message_for_gift(gift)
+        self.assertIn("ID 72", msg)
+        self.assertEqual(len(nft_buttons(gift)), 1)
+        self.assertIn("Кому подарили", msg)
+
+    async def test_rare_and_regular_have_same_simple_layout(self):
+        normal = message_for_gift(item())
+        rare = message_for_gift(item("rare_nft"))
+        self.assertEqual(normal, rare)
+
+    async def test_delivery_diagnostic_is_plain(self):
+        gift = {"kind": "delivery_test"}
         bot = SimpleNamespace(send_message=AsyncMock())
-        await send_alert(bot, 42, message_for_gift(item), item)
+        await send_alert(bot, 42, message_for_gift(gift), gift)
+        self.assertFalse(bot.send_message.await_args.kwargs["link_preview"])
+        self.assertIsNone(bot.send_message.await_args.kwargs["buttons"])
+
+    async def test_no_automatic_preview_for_unrelated_text(self):
+        bot = SimpleNamespace(send_message=AsyncMock())
+        await send_alert(bot, 42, "Update", {"kind": "upgrade_unlocked"})
         self.assertFalse(bot.send_message.await_args.kwargs["link_preview"])
 
-    async def test_delivery_probe_does_not_show_preview(self):
-        item = {"kind": "delivery_test"}
-        bot = SimpleNamespace(send_message=AsyncMock())
-        await send_alert(bot, 42, message_for_gift(item), item)
-        self.assertFalse(bot.send_message.await_args.kwargs["link_preview"])
-
-    def test_plain_fallback_contains_exact_link(self):
-        body = fallback_text(nft_item())
-        self.assertIn("https://t.me/nft/PartySparkler-189558", body)
+    def test_fallback_retains_nft_url(self):
+        self.assertIn("https://t.me/nft/PartySparkler-189558", fallback_text(item()))
 
 
 if __name__ == "__main__":
