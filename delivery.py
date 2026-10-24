@@ -34,32 +34,19 @@ def is_bad_markup(exc: BaseException) -> bool:
 
 
 def fallback_text(item: dict[str, Any]) -> str:
-    kind = item.get("kind", "")
-    if kind == "market_deal":
+    if item.get("kind") == "delivery_test":
+        return "Проверка доставки\nСообщение отправлено."
+    if item.get("kind") in {"new_nft", "rare_nft"}:
+        from recipient_filter import recipient_from_history
+        person = recipient_from_history(item.get("original_participants"))
+        recipient = str(person.get("label") or "Получатель") if person else "Не указан"
         return (
-            "📉 Возможная рыночная сделка (упрощённо)\n"
-            f"https://t.me/nft/{item.get('slug', '')}\n"
-            f"Площадка: {item.get('market', '?')}\n"
-            f"Цена: {item.get('price_display', '?')}\n"
-            "⚠️ Проверь предложение в Telegram; доходность не гарантирована."
+            f"{item.get('title', 'NFT')} #{item.get('number', '?')}\n"
+            f"https://t.me/nft/{item.get('slug', '')}\n\n"
+            f"Кому подарили: {recipient}\n"
+            f"Модель: {item.get('model', '?')}"
         )
-    if kind in {"new_nft", "rare_nft"}:
-        slug = str(item.get("slug") or "").strip()
-        title = str(item.get("title") or "NFT")
-        number = item.get("number", "?")
-        return (
-            "💎 НОВЫЙ NFT (упрощённое уведомление)\n"
-            f"{title} #{number}\n"
-            f"Модель: {item.get('model', '?')} ({item.get('model_rarity', '?')})\n"
-            f"https://t.me/nft/{slug}\n"
-            "Полные данные: /last"
-        )
-    return (
-        "🔔 Обновление подарка\n"
-        f"{item.get('title', 'Gift')}\n"
-        f"Тип: {kind}\n"
-        f"Gift ID: {item.get('gift_id', '?')}"
-    )
+    return str(item.get("title") or "Gift Radar")
 
 
 async def dispatch_next(
