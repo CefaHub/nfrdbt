@@ -101,7 +101,7 @@ class IntegratedLiveEvents(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "deliver_pending", new_callable=AsyncMock) as wake:
             await main.live_market_event(listing)
             self.assertEqual(main.state.data["pending"], [])
-            self.assertIn("PlushPepe-1234", main.state.data["live_last_listings"])
+            self.assertNotIn("live_last_listings", main.state.data)
             wake.assert_not_awaited()
 
     async def test_live_new_without_recipient_does_not_notify(self):
