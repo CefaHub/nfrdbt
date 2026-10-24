@@ -1,107 +1,45 @@
-import asyncio
 import json
 import unittest
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
-from live_market import (
-    normalize_live_event, gift_slug, market_price, verified_public_seller,
-    record_sale, estimate_listing, deal_notification, live_nft_notification,
-)
+from live_market import gift_slug, normalize_live_event, live_nft_notification
 from see_live import HEALTH, consume_socket, subscribe_packet
 
 
-def listing(slug="PlushPepe", num=42, amount=3_500_000_000):
+def mint(number=42):
     return {
-        "type": "event", "event": "listing",
-        "at": "2026-10-24T02:00:00.000Z", "market": "portals",
-        "gift": {"slug": slug, "num": num, "title": "Plush Pepe",
-                 "model": "Cyberpunk", "backdrop": "Onyx Black",
-                 "pattern": "Skull", "owner_name": "Miller"},
-        "price": {"amount": amount, "currency": "gram"},
+        "type": "event", "event": "new",
+        "at": "2026-10-24T02:00:00Z",
+        "gift": {
+            "slug": "PlushPepe", "num": number,
+            "title": "Plush Pepe", "model": "Cyberpunk",
+            "backdrop": "Onyx Black", "pattern": "Skull",
+        },
     }
 
 
-class MarketPureTests(unittest.TestCase):
-    def test_documented_listing_gift_and_nano_ton_price(self):
-        data = normalize_live_event(listing())
-        self.assertEqual(data["slug"], "PlushPepe-42")
-        self.assertEqual(data["price"]["ton"], 3.5)
-        self.assertEqual(data["price"]["display"], "3.5 TON")
-        self.assertIsNone(data["seller"])  # owner_name is not a username
+class MintEventTests(unittest.TestCase):
+    def test_slug_and_event(self):
+        e = normalize_live_event(mint())
+        self.assertEqual(e["slug"], "PlushPepe-42")
+        self.assertEqual(e["type"], "new")
+        alert = live_nft_notification(e)
+        self.assertEqual(alert["kind"], "new_nft")
+        self.assertEqual(alert["slug"], "PlushPepe-42")
 
-    def test_new_upgrade_gift_resolves(self):
-        msg = listing()
-        msg["event"] = "new"
-        msg.pop("price")
-        data = normalize_live_event(msg)
-        nft = live_nft_notification(data)
-        self.assertEqual(nft["kind"], "new_nft")
-        self.assertEqual(nft["slug"], "PlushPepe-42")
-        self.assertIsNone(nft["owner_url"])
-        self.assertEqual(nft["live_source"], "see.tg WebSocket")
+    def test_ignore_market_events(self):
+        for typ in ("listing", "sale", "transfer", "price"):
+            self.assertIsNone(normalize_live_event(mint() | {"event": typ}))
 
-    def test_public_seller_requires_explicit_unhidden_username(self):
-        msg = listing()
-        msg["seller"] = {"type": "user", "username": "PublicSeller"}
-        self.assertEqual(verified_public_seller(msg)["url"],
-                         "https://t.me/PublicSeller")
-        msg["seller"]["hidden"] = True
-        self.assertIsNone(verified_public_seller(msg))
-
-    def test_historical_display_name_never_becomes_chat(self):
-        msg = listing()
-        msg["gift"]["owner_name"] = "𝒜𝒷𝑒𝓁"
-        self.assertIsNone(verified_public_seller(msg))
-        msg["gift"]["owner"] = {"type": "user", "displayName": "𝒜𝒷𝑒𝓁"}
-        self.assertIsNone(verified_public_seller(msg))
-
-    def test_price_units_are_not_confused(self):
-        self.assertEqual(market_price({"amount": 1_500_000, "currency": "usdt"})["display"], "1.5 USDT")
-        self.assertEqual(market_price({"amount": 80, "currency": "xtr"})["display"], "80 Stars")
-        self.assertIsNone(market_price({"amount": 10, "currency": "fake"}))
-        self.assertIsNone(market_price({"amount": True, "currency": "gram"}))
-
-    def test_deal_requires_at_least_three_sales(self):
-        candidate = normalize_live_event(listing(amount=2_000_000_000))
-        state = {}
-        self.assertFalse(estimate_listing(state, candidate)["comparable"])
-        for i, amount in enumerate((3_000_000_000, 4_000_000_000)):
-            sale = normalize_live_event(listing(num=i + 1, amount=amount) |
-                                        {"event": "sale"})
-            record_sale(state, sale)
-        self.assertFalse(estimate_listing(state, candidate)["comparable"])
-        sale = normalize_live_event(listing(num=8, amount=5_000_000_000) |
-                                    {"event": "sale"})
-        record_sale(state, sale)
-        signal = estimate_listing(state, candidate)
-        self.assertEqual(signal["median_ton"], 4.0)
-        self.assertTrue(signal["potential_bargain"])
-        self.assertEqual(signal["sample_size"], 3)
-        deal = deal_notification(candidate, signal)
-        self.assertEqual(deal["price_display"], "2 TON")
-        self.assertEqual(deal["kind"], "market_deal")
-
-    def test_unpriced_new_gift_never_flagged_as_bargain(self):
-        msg = listing()
-        msg["event"] = "new"
-        msg.pop("price")
-        gift = normalize_live_event(msg)
-        self.assertFalse(estimate_listing({}, gift)["comparable"])
-        self.assertIsNone(deal_notification(gift, {"potential_bargain": True}))
-
-    def test_sale_deduplicated(self):
-        sale = normalize_live_event(listing(num=3) | {"event": "sale"})
-        state = {}
-        self.assertTrue(record_sale(state, sale))
-        self.assertFalse(record_sale(state, sale))
-        self.assertEqual(len(state["live_market_sales"]), 1)
-
-    def test_invalid_payloads_ignored(self):
-        self.assertIsNone(normalize_live_event({"type": "event", "event": "new",
-                                                "gift": {"slug": "danger/../", "num": 2}}))
+    def test_invalid_slug_and_payload(self):
+        self.assertIsNone(normalize_live_event(mint() | {
+            "gift": {"slug": "../foo", "num": 1},
+        }))
         self.assertIsNone(normalize_live_event({"type": "stats"}))
-        self.assertIsNone(normalize_live_event({"type": "event", "event": "unknown"}))
+
+    def test_exact_gift_slug_preserved(self):
+        gift = mint()
+        gift["gift"] = {"slug": "PlushPepe-200"}
+        self.assertEqual(normalize_live_event(gift)["slug"], "PlushPepe-200")
 
 
 class FakeSocket:
@@ -123,78 +61,46 @@ class FakeSocket:
             raise StopAsyncIteration
 
 
-class LiveWebSocketTests(unittest.IsolatedAsyncioTestCase):
-    async def test_guest_auth_requires_no_token_and_receive_event(self):
-        results = []
-        sock = FakeSocket([listing()])
-        async def collect(event):
-            results.append(event)
-        await consume_socket(sock, collect)
-        self.assertEqual(sock.sent[0]["type"], "subscribe")
-        self.assertIn("new", sock.sent[0]["events"])
-        self.assertEqual(results[0]["slug"], "PlushPepe-42")
+async def capture(items, event):
+    items.append(event)
 
-    async def test_authenticated_stream_uses_message_not_url_token(self):
+
+class LiveWebSocketTests(unittest.IsolatedAsyncioTestCase):
+    async def test_guest_subscribes_to_new_only(self):
+        output = []
+        sock = FakeSocket([mint()])
+        await consume_socket(sock, lambda ev: capture(output, ev))
+        self.assertEqual(sock.sent[0], {"type": "subscribe", "events": ["new"]})
+        self.assertEqual(len(output), 1)
+
+    async def test_auth_token_only_in_auth_message(self):
         sock = FakeSocket([])
-        async def collect(event):
-            return None
-        await consume_socket(sock, collect, token="SECRET_TOKEN")
-        self.assertEqual(sock.sent[0], {"type": "auth", "token": "SECRET_TOKEN"})
+        await consume_socket(sock, lambda ev: capture([], ev), token="secret")
+        self.assertEqual(sock.sent[0], {"type": "auth", "token": "secret"})
         self.assertEqual(sock.sent[1]["type"], "subscribe")
 
-    async def test_kind_disabled_is_documented_server_limitation_not_transport_failure(self):
-        sale = listing()
-        sale["event"] = "sale"
-        received = []
+    async def test_disabled_new_does_not_break_connection(self):
         sock = FakeSocket([
-            {"type": "hello", "events": ["listing", "sale"],
-             "disabled": ["new"]},
             {"type": "error", "code": "kind_disabled", "events": ["new"]},
-            sale,
         ])
-        await consume_socket(sock, lambda event: captured(received, event))
-        self.assertEqual(HEALTH["status"], "подключено")
+        await consume_socket(sock, lambda ev: capture([], ev))
         self.assertEqual(HEALTH["disabled_kinds"], ["new"])
+        self.assertEqual(HEALTH["status"], "подключено")
         self.assertIsNone(HEALTH["last_error"])
-        self.assertIn("new", HEALTH["last_notice"])
-        self.assertEqual(HEALTH["event_counts"]["sale"] >= 1, True)
-        self.assertEqual(received[0]["type"], "sale")
 
-    async def test_kind_enabled_clears_disabled_and_resubscribes(self):
+    async def test_enabled_new_resubscribes(self):
         sock = FakeSocket([
-            {"type": "kind_disabled", "events": ["new"], "unsubscribed": ["new"]},
+            {"type": "kind_disabled", "events": ["new"]},
             {"type": "kind_enabled", "events": ["new"]},
         ])
-        await consume_socket(sock, lambda event: captured([], event))
+        await consume_socket(sock, lambda ev: capture([], ev))
         self.assertNotIn("new", HEALTH["disabled_kinds"])
         self.assertEqual(len(sock.sent), 2)
-        self.assertIn("new", sock.sent[1]["events"])
 
-    async def test_subscription_ack_discloses_rejected_event_kinds(self):
-        sock = FakeSocket([
-            {"type": "subscribed", "events": ["sale", "listing"],
-             "disabled": ["new", "price"]},
-        ])
-        await consume_socket(sock, lambda event: captured([], event))
-        self.assertEqual(HEALTH["disabled_kinds"], ["new", "price"])
-        self.assertIsNone(HEALTH["last_error"])
-
-    async def test_unrelated_server_error_remains_an_error(self):
-        sock = FakeSocket([
-            {"type": "error", "code": "too_many_connections"},
-        ])
-        await consume_socket(sock, lambda event: captured([], event))
-        self.assertEqual(HEALTH["last_error"], "see.tg WebSocket: too_many_connections")
-
-    async def test_bad_json_is_safely_ignored(self):
-        collected = []
-        sock = FakeSocket([{"type": "stats"}, listing()])
-        await consume_socket(sock, lambda ev: captured(collected, ev))
-        self.assertEqual(len(collected), 1)
-
-
-async def captured(items, event):
-    items.append(event)
+    async def test_unrelated_error_visible(self):
+        sock = FakeSocket([{"type": "error", "code": "invalid_request"}])
+        await consume_socket(sock, lambda ev: capture([], ev))
+        self.assertEqual(HEALTH["last_error"], "see.tg WebSocket: invalid_request")
 
 
 if __name__ == "__main__":
