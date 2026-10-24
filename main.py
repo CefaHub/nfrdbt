@@ -469,6 +469,70 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
         await asyncio.sleep(delay)
 
 
+async def retry_new_recipient_details(user: TelegramClient, bot: TelegramClient) -> None:
+    """Retry fresh gifts which initially lacked original recipient metadata."""
+    while True:
+        try:
+            for slug in due_reviews(state.data, limit=2):
+                NFT_HEALTH["rechecked"] += 1
+                try:
+                    details = await user(
+                        functions.payments.GetUniqueStarGiftRequest(slug=slug)
+                    )
+                    unique = details.gift
+                    if str(getattr(unique, "slug", "")).lower() != slug.lower():
+                        raise ValueError("Gift slug mismatch")
+                    history = original_participants(unique, details)
+                    if recipient_from_history(history) and not getattr(unique, "crafted", False):
+                        try:
+                            enriched = await asyncio.wait_for(
+                                resolve_original_participants(unique, details, user),
+                                timeout=2.5,
+                            )
+                            if recipient_from_history(enriched):
+                                history = enriched
+                        except Exception:
+                            pass
+                        event = make_event(
+                            unique, extract_attributes(unique), now_utc(), rare=False
+                        )
+                        event["original_participants"] = history
+                        drop_review(state.data, slug)
+                        state.save()
+                        if state.record_nft_once(event):
+                            NFT_HEALTH["recovered"] += 1
+                            NFT_HEALTH["last_queued_slug"] = slug
+                            log.info("NFT RECOVERED AND QUEUED: %s pending=%d",
+                                     slug, len(state.data["pending"]))
+                            await deliver_pending(bot)
+                        else:
+                            log.info("NFT RECOVERED BUT ALREADY SEEN: %s", slug)
+                        continue
+                    more = reschedule_review(state.data, slug)
+                    state.save()
+                    if more:
+                        log.info("NFT RECHECK NO RECIPIENT: %s (retry later)", slug)
+                    else:
+                        NFT_HEALTH["permanently_skipped"] += 1
+                        log.info("NFT FINAL SKIP: %s (original recipient unavailable)", slug)
+                except FloodWaitError as exc:
+                    more = reschedule_review(state.data, slug)
+                    state.save()
+                    log.warning("NFT recipient review FloodWait=%ds for %s", exc.seconds, slug)
+                    await asyncio.sleep(exc.seconds + 3)
+                except Exception as exc:
+                    more = reschedule_review(state.data, slug)
+                    state.save()
+                    log.warning("NFT recipient review failed %s: %s",
+                                slug, type(exc).__name__)
+                await asyncio.sleep(0.4)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("NFT recipient review loop failed")
+        await asyncio.sleep(5)
+
+
 async def monitor(user: TelegramClient, bot: TelegramClient) -> None:
     while True:
         delay = INTERVAL
@@ -696,6 +760,7 @@ async def run() -> None:
         DELIVERY_WAKE.set()  # Flush persisted unsent NFT alerts on startup.
         if TRACK_RARE_NFTS:
             tasks.append(asyncio.create_task(monitor_rare_nfts(user, bot)))
+            tasks.append(asyncio.create_task(retry_new_recipient_details(user, bot)))
         await asyncio.gather(*tasks)
     finally:
         await bot.disconnect()
