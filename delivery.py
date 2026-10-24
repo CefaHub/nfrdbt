@@ -1,8 +1,8 @@
 """Reliable NFT notification outbox.
 
-The scanner writes events to RadarState.pending; this module handles exactly
-one persisted event at a time without blocking the scanner. A successful
-Telegram send is acknowledged in state.json; failed sends remain on disk.
+The scanner writes events to RadarState.pending; this module delivers each
+persisted alert to each authorized recipient independently. Only successful
+individual sends are acknowledged; failed sends remain on disk.
 """
 from __future__ import annotations
 
@@ -66,13 +66,23 @@ async def dispatch_next(
     if not pending:
         return "idle", None
     item = pending[0]
+    active = set(state.recipient_ids)
+    targets = item.get("targets", [state.owner_id])
+    delivered = set(item.get("delivered_to", []))
+    remaining = [uid for uid in targets if uid in active and uid not in delivered]
+    if not remaining:
+        # Every intended recipient received the gift or has unsubscribed.
+        state.pop_delivered(item["event_id"])
+        return "idle", None
+    recipient_id = remaining[0]
+    payload = dict(item, _target_id=recipient_id)
     try:
-        await rich_sender(item)
+        await rich_sender(payload)
         result = "sent"
     except Exception as exc:
         if not is_bad_markup(exc):
             raise
-        await plain_sender(item)
+        await plain_sender(payload)
         result = "plain"
-    state.pop_delivered(item["event_id"])
-    return result, item
+    state.mark_delivered_to(item["event_id"], recipient_id)
+    return result, payload
