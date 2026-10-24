@@ -139,7 +139,8 @@ def _private_profile_user_id(item: dict) -> int | None:
     user_id = recipient["id"]
     # This case needs Bot API's native user-profile button, not an MTProto
     # inputKeyboardButtonUrl. Normal Telegram clients can ignore ID URL links.
-    if recipient.get("url") == f"tg://user?id={user_id}":
+    if (recipient.get("url") in (None, f"tg://user?id={user_id}")
+            and not recipient.get("public_username")):
         return user_id
     return None
 
