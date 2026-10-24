@@ -163,6 +163,7 @@ async def delivery_worker(bot: TelegramClient) -> None:
     """
     backoff = 2.0
     while True:
+        target_id = None
         try:
             removed = filter_pending(state)
             if removed:
@@ -176,11 +177,15 @@ async def delivery_worker(bot: TelegramClient) -> None:
                 continue
 
             async def send_rich(item: dict) -> None:
-                await send_alert(bot, state.owner_id, message_for_gift(item), item)
+                nonlocal target_id
+                target_id = item["_target_id"]
+                await send_alert(bot, target_id, message_for_gift(item), item)
 
             async def send_plain(item: dict) -> None:
+                nonlocal target_id
+                target_id = item["_target_id"]
                 await bot.send_message(
-                    state.owner_id,
+                    target_id,
                     fallback_text(item),
                     link_preview=item.get("kind") in {"new_nft", "rare_nft"},
                 )
@@ -199,8 +204,8 @@ async def delivery_worker(bot: TelegramClient) -> None:
             DELIVERY_STATS["last_error"] = None
             DELIVERY_STATS["next_delay_sec"] = 0
             log.info(
-                "DELIVERY OK (%s) nft=%s pending=%d total_sent=%d",
-                result, DELIVERY_STATS["last_slug"] or (item or {}).get("kind"),
+                "DELIVERY OK (%s) recipient=%s nft=%s pending=%d total_sent=%d",
+                result, target_id, DELIVERY_STATS["last_slug"] or (item or {}).get("kind"),
                 len(state.data["pending"]), DELIVERY_STATS["sent"],
             )
             backoff = 2.0
@@ -219,6 +224,18 @@ async def delivery_worker(bot: TelegramClient) -> None:
                         exc.seconds, len(state.data["pending"]))
             await asyncio.sleep(delay)
         except Exception as exc:
+            if (target_id is not None and target_id != state.owner_id
+                    and type(exc).__name__ in {
+                        "UserIsBlockedError", "InputUserDeactivatedError",
+                        "UserDeactivatedBanError", "ChatWriteForbiddenError",
+                        "PeerIdInvalidError",
+                    }):
+                # Never let an unreachable subscriber block the owner's NFT queue.
+                state.remove_subscriber(target_id)
+                log.warning("Removed unreachable subscriber %s: %s",
+                            target_id, type(exc).__name__)
+                backoff = 2.0
+                continue
             DELIVERY_STATS["errors"] += 1
             DELIVERY_STATS["retries"] += 1
             DELIVERY_STATS["last_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
@@ -730,6 +747,9 @@ async def run() -> None:
         if not cmd.startswith("/"):
             return
 
+        # Never log command arguments: they can contain invite/activation secrets.
+        log.info("Gift Radar command %s from user=%s", cmd, event.sender_id)
+
         if state.owner_id is None:
             if cmd == "/start" and state.consume_activation_key(
                 argument, event.sender_id
@@ -737,10 +757,46 @@ async def run() -> None:
                 await event.respond("Радар подключён.\n/status — состояние")
                 await deliver_pending(bot)
             else:
-                await event.respond("Для подключения: /start КЛЮЧ")
+                await event.respond("Для подключения владельца: /start КЛЮЧ")
             return
 
         if event.sender_id != state.owner_id:
+            if cmd in ("/join", "/start") and argument:
+                if state.accept_invite(argument, event.sender_id):
+                    await event.respond(
+                        "Готово, ты подключён к NFT-радару! "
+                        "Новые находки будут приходить сюда.\n"
+                        "/status — проверить подписку\n/leave — выйти"
+                    )
+                    await deliver_pending(bot)
+                else:
+                    await event.respond(
+                        "Код приглашения неверный или просрочен. "
+                        "Попроси у владельца новый /invite."
+                    )
+            elif state.is_subscriber(event.sender_id):
+                if cmd in ("/start", "/help", "/status"):
+                    await event.respond(
+                        "Ты подписан на NFT Gift Radar. "
+                        "Новые подарки будут приходить автоматически.\n"
+                        f"Уведомления: {'пауза' if state.data['paused'] else 'включены'}\n"
+                        "/leave — отключить подписку"
+                    )
+                elif cmd == "/leave":
+                    state.remove_subscriber(event.sender_id)
+                    await event.respond("Подписка отключена.")
+                elif cmd in ("/ping", "/test"):
+                    await event.respond("Радар работает, подписка активна.")
+                else:
+                    await event.respond(
+                        "Эта команда доступна только владельцу радара."
+                    )
+            elif cmd in ("/start", "/help", "/activate", "/join"):
+                await event.respond(
+                    "Это частный NFT-радар. Чтобы получать подарки, "
+                    "попроси владельца создать приглашение командой /invite.\n"
+                    "Затем отправь сюда /join КОД."
+                )
             return
 
         if cmd in ("/start", "/help"):
@@ -748,6 +804,9 @@ async def run() -> None:
                 "<b>Gift Radar</b>\n"
                 "Новые подарки с указанным получателем.\n\n"
                 "/status — состояние\n"
+                "/invite — пригласить друга в радар\n"
+                "/friends — показать подключённых\n"
+                "/remove ID — отключить друга\n"
                 "/pushall — отправить очередь и перепроверить NFT\n"
                 "/flush — повторить отправку очереди\n"
                 "/last — последние подарки\n"
@@ -755,6 +814,28 @@ async def run() -> None:
                 "/resume — включить уведомления",
                 parse_mode="html",
             )
+        elif cmd == "/invite":
+            code = state.create_invite()
+            await event.respond(
+                "Приглашение действует 24 часа и используется один раз.\n"
+                "Отправь другу эту команду (не публикуй её):\n"
+                f"/join {code}"
+            )
+        elif cmd == "/friends":
+            friends = state.data.get("subscribers") or []
+            await event.respond(
+                "Подключённые получатели (без владельца):\n"
+                + ("\n".join(str(friend) for friend in friends)
+                   if friends else "Пока никого. Команда /invite создаёт приглашение.")
+            )
+        elif cmd == "/remove":
+            if not argument.isdigit() or int(argument) == state.owner_id:
+                await event.respond("Использование: /remove USER_ID (см. /friends)")
+            elif state.remove_subscriber(int(argument)):
+                await event.respond("Подписчик отключён.")
+                await deliver_pending(bot)
+            else:
+                await event.respond("Такого подписчика нет.")
         elif cmd == "/status":
             disabled = LIVE_HEALTH.get("disabled_kinds") or []
             live = LIVE_HEALTH["status"] if LIVE_ENABLED else "выключен"
@@ -769,6 +850,7 @@ async def run() -> None:
                 f"see.tg: {html.escape(live)}\n"
                 f"Из потока: {LIVE_COUNTERS['new_notified']}\n"
                 f"Очередь отправки: {len(state.data['pending'])}\n"
+                f"Получателей уведомлений: {len(state.recipient_ids)}\n"
                 f"Повторная проверка: {pending_count(state.data)} NFT\n"
                 f"Найдено повторно: {RECOVERY_STATS['found']}\n"
                 f"Ошибок перепроверки: {RECOVERY_STATS['errors']}\n"
@@ -890,6 +972,7 @@ async def run() -> None:
             state.data["pending"].insert(0, {
                 "kind": "delivery_test",
                 "event_id": __import__("secrets").token_hex(16),
+                "targets": [state.owner_id],
                 "title": "Test",
                 "created_at": now_utc(),
             })
