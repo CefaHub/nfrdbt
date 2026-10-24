@@ -15,7 +15,7 @@ import websockets
 from live_market import normalize_live_event
 
 URL = "wss://live.see.tg/v1/ws"
-EVENTS = ["new", "listing", "price", "sale", "transfer", "opened"]
+EVENTS = ["new"]
 HEALTH: dict[str, Any] = {
     "status": "не запускался", "connected_at": None,
     "last_event": None, "last_event_type": None, "events_seen": 0,
