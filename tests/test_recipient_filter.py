@@ -45,6 +45,16 @@ class RecipientOnlyTests(unittest.TestCase):
              "url": "tg://user?id=123"}
         ]))
 
+    def test_real_recipient_with_private_channel_no_public_link_qualifies(self):
+        self.assertIsNotNone(recipient_from_history([
+            {"role": "recipient", "type": "channel", "id": 444,
+             "url": None, "label": "Channel 444"}
+        ]))
+        self.assertIsNotNone(recipient_from_history([
+            {"role": "recipient", "type": "chat", "id": 555,
+             "url": None, "label": "Private chat"}
+        ]))
+
     def test_ordinary_market_and_upgrade_alerts_are_silent(self):
         for kind in ("market_deal", "upgrade_unlocked", "new_upgradable_gift",
                      "upgrade_price_changed"):
