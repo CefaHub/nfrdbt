@@ -130,7 +130,8 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
     async def test_profile_button_recipient_with_id_without_username(self):
         gift = item()
         gift["original_participants"][-1]["url"] = "tg://user?id=72"
-        self.assertEqual(nft_buttons(gift)[1][0].text, "Профиль")
+        self.assertEqual(len(nft_buttons(gift)), 1)
+        self.assertEqual(nft_buttons(gift)[0][0].text, "Открыть подарок")
         self.assertIn("CurrentOwner99", message_for_gift(gift))
 
     async def test_rare_and_regular_have_same_simple_layout(self):
