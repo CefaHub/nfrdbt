@@ -5,6 +5,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -670,10 +671,56 @@ async def run() -> None:
                 f"see.tg: {html.escape(live)}\n"
                 f"Из потока: {LIVE_COUNTERS['new_notified']}\n"
                 f"Очередь: {len(state.data['pending'])}\n"
+                f"Последний новый с получателем: {NFT_HEALTH['last_queued_slug'] or 'нет'}\n"
+                f"Последний без получателя: {NFT_HEALTH['last_filtered_slug'] or 'нет'}\n"
+                f"На повторной проверке: {len(state.data.get('recipient_reviews') or {})}\n"
+                f"Восстановлено после повтора: {NFT_HEALTH['recovered']}\n"
+                f"Последняя отправка: {DELIVERY_STATS['last_sent'] or 'нет'} UTC\n"
                 f"Доставлено: {DELIVERY_STATS['sent']}\n"
                 f"Ошибка отправки: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}",
                 parse_mode="html",
             )
+        elif cmd == "/check":
+            # Owner-only diagnosis. Never enqueue an arbitrary older gift.
+            slug = argument.strip().split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+            if not re.fullmatch(r"[A-Za-z0-9]+-[1-9][0-9]*", slug):
+                await event.respond("Пример: /check SnowMittens-40508")
+                return
+            try:
+                details = await user(
+                    functions.payments.GetUniqueStarGiftRequest(slug=slug)
+                )
+                gift = details.gift
+                history = original_participants(gift, details)
+                recipient = recipient_from_history(history)
+                types = [type(x).__name__ for x in (getattr(gift, "attributes", []) or [])]
+                original = "StarGiftAttributeOriginalDetails" in types
+                seen = slug in (state.data.get("seen_nft_slugs") or [])
+                queued = any(x.get("slug") == slug for x in state.data.get("pending", []))
+                review = slug in (state.data.get("recipient_reviews") or {})
+                if recipient:
+                    result = f"Есть: {html.escape(str(recipient.get('label') or recipient['id']))}"
+                else:
+                    result = (
+                        "Нет сохранённой истории подарка"
+                        if not original else "История есть, но Telegram не раскрыл получателя"
+                    )
+                await event.respond(
+                    f"<b>{html.escape(slug)}</b>\n"
+                    f"Получатель: {result}\n"
+                    f"В очереди: {'да' if queued else 'нет'}\n"
+                    f"Ранее учтён: {'да' if seen else 'нет'}\n"
+                    f"Ожидает повтор: {'да' if review else 'нет'}\n"
+                    f"Уведомления: {'пауза' if state.data['paused'] else 'включены'}\n"
+                    "Сначала проверяется получатель, затем сообщение отправляется.",
+                    parse_mode="html", link_preview=False,
+                )
+            except FloodWaitError as exc:
+                await event.respond(f"Telegram ограничил проверку на {exc.seconds} сек.")
+            except Exception as exc:
+                log.warning("Manual check failed %s: %s", slug, type(exc).__name__)
+                await event.respond(f"Не удалось проверить {html.escape(slug)}: "
+                                    f"{html.escape(type(exc).__name__)}")
         elif cmd == "/last":
             recent = [
                 item for item in reversed(state.data.get("history") or [])
