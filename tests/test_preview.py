@@ -2,7 +2,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault("BOT_TOKEN", "offline-dummy-token")
 from main import message_for_gift, send_alert, nft_buttons
@@ -83,6 +83,49 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
         # Do not misroute to owner from the text when original recipient is hidden.
         self.assertEqual(len(nft_buttons(gift)), 1)
         self.assertIn("Владелец:", message_for_gift(gift))
+
+    async def test_private_user_profile_sent_as_native_bot_api_profile_button(self):
+        gift = item()
+        gift["original_participants"][-1].update({
+            "label": "No username", "public_username": None,
+            "url": "tg://user?id=72",
+        })
+        bot = SimpleNamespace(send_message=AsyncMock())
+        # A Bot API URL with tg://user?id= is converted to the native
+        # keyboardButtonUserProfile by Telegram's Bot API.
+        with patch("main._send_private_profile_via_bot_api", new_callable=AsyncMock,
+                   create=True, return_value=True) as api_send:
+            await send_alert(bot, 42, message_for_gift(gift), gift)
+        api_send.assert_awaited_once()
+        self.assertEqual(api_send.await_args.args[0], 42)
+        self.assertEqual(api_send.await_args.args[2], gift)
+        bot.send_message.assert_not_awaited()
+        self.assertIn("Владелец:", message_for_gift(gift))
+
+    async def test_private_profile_privacy_failure_delivers_without_broken_button(self):
+        gift = item()
+        gift["original_participants"][-1]["url"] = "tg://user?id=72"
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch("main._send_private_profile_via_bot_api", new_callable=AsyncMock,
+                   create=True, return_value=False):
+            await send_alert(bot, 42, message_for_gift(gift), gift)
+        buttons = bot.send_message.await_args.kwargs["buttons"]
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(buttons[0][0].text, "Открыть подарок")
+
+    def test_private_user_profile_request_has_both_buttons(self):
+        import main
+        gift = item()
+        gift["original_participants"][-1]["url"] = "tg://user?id=72"
+        payload = main._private_profile_payload(42, message_for_gift(gift), gift)
+        self.assertEqual(payload["chat_id"], 42)
+        self.assertEqual(payload["parse_mode"], "HTML")
+        rows = payload["reply_markup"]["inline_keyboard"]
+        self.assertEqual(rows[0][0]["url"], "https://t.me/nft/PartySparkler-189558")
+        self.assertEqual(rows[1][0]["text"], "Профиль")
+        self.assertEqual(rows[1][0]["url"], "tg://user?id=72")
+        self.assertEqual(payload["link_preview_options"]["url"],
+                         "https://t.me/nft/PartySparkler-189558")
 
     async def test_profile_button_recipient_with_id_without_username(self):
         gift = item()
