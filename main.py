@@ -236,6 +236,12 @@ NFT_HEALTH = {
     "last_batch_duration": None,
     "last_batch_successful": 0,
     "filtered_no_recipient": 0,
+    "last_filtered_slug": None,
+    "last_queued_slug": None,
+    "last_duplicate_slug": None,
+    "rechecked": 0,
+    "recovered": 0,
+    "permanently_skipped": 0,
 }
 # Avoid retrying an invalid slug every minute. This cache is process-local.
 UNRESOLVED_UNTIL: dict[str, float] = {}
