@@ -57,7 +57,7 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["buttons"][1][0].text, "Профиль владельца")
         self.assertIn("https://t.me/CurrentOwner99", text)
 
-    async def test_owner_without_public_profile_has_no_misleading_button(self):
+    async def test_owner_without_public_username_keeps_owner_profile_button(self):
         gift = item()
         gift["owner"] = {
             "kind": "user", "id": 99,
@@ -65,8 +65,11 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
         }
         msg = message_for_gift(gift)
         self.assertIn("Владелец: Telegram ID 99", msg)
-        self.assertEqual(len(nft_buttons(gift)), 1)
         self.assertNotIn("Recipient72", msg)
+        buttons = nft_buttons(gift)
+        self.assertEqual(len(buttons), 2)
+        self.assertEqual(buttons[1][0].text, "Профиль владельца")
+        self.assertIn("99", repr(buttons[1][0]))
 
     async def test_legacy_notifications_do_not_mislabel_original_recipient(self):
         gift = item()
