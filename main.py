@@ -786,9 +786,9 @@ async def run() -> None:
                     else:
                         plan = "Бессрочный доступ активирован."
                     await event.respond(
-                        f"NFT Gift Radar подключён!\\n{plan}\\n"
-                        "Новые NFT будут приходить сюда автоматически.\\n"
-                        "/status — состояние подписки\\n"
+                        f"NFT Gift Radar подключён!\n{plan}\n"
+                        "Новые NFT будут приходить сюда автоматически.\n"
+                        "/status — состояние подписки\n"
                         "/stop — отключить уведомления."
                     )
                     await deliver_pending(bot)
@@ -810,8 +810,8 @@ async def run() -> None:
                         ).strftime("%d.%m.%Y %H:%M UTC")
                         plan = f"Доступ на 1 день до {until}"
                     await event.respond(
-                        f"NFT-радар активен. {plan}.\\n"
-                        "Новые подарки приходят автоматически.\\n"
+                        f"NFT-радар активен. {plan}.\n"
+                        "Новые подарки приходят автоматически.\n"
                         "/stop — отключить уведомления."
                     )
                 elif cmd in ("/stop", "/leave"):
