@@ -17,6 +17,7 @@ from radar import Gift, RadarState, now_utc
 from mint_radar import extract_attributes, make_event
 from candidate_selection import get_candidates
 from gift_origin import original_participants, resolve_original_participants
+from gift_owner import resolve_current_owner, profile_url
 from delivery import fallback_text, is_bad_markup
 from commercial import CommercialStore, ADMIN_ID
 from scan_pacing import remaining_pause
@@ -107,20 +108,13 @@ def message_for_gift(item: dict) -> str:
     number = html.escape(str(item.get("number") or "?"))
     slug = str(item["slug"])
     nft_link = f"https://t.me/nft/{slug}"
-    recipient = recipient_from_history(item.get("original_participants"))
-    if recipient:
-        name = html.escape(str(recipient.get("label") or "Получатель"))
-        url = str(recipient.get("url") or "")
-        if url.startswith("https://t.me/"):
-            name = f'<a href="{html.escape(url, quote=True)}">{name}</a>'
-        elif recipient.get("id"):
-            name += f" (ID {recipient['id']})"
-        recipient_line = f"Кому подарили: {name}"
-    else:
-        # Should never enter the automatic queue, but tolerate historical data.
-        recipient_line = "Получатель не указан"
+    owner = item.get("owner") or {}
+    name = html.escape(str(owner.get("label") or "Не указан"))
+    url = profile_url(owner)
+    if url:
+        name = f'<a href="{html.escape(url, quote=True)}">{name}</a>'
 
-    fields = [f"<b>{title} #{number}</b>", nft_link, recipient_line]
+    fields = [f"<b>{title} #{number}</b>", nft_link, f"Владелец: {name}"]
     for label, field in (("Модель", "model"), ("Фон", "backdrop"),
                          ("Символ", "pattern")):
         value = str(item.get(field) or "").strip()
@@ -133,11 +127,9 @@ def nft_buttons(item: dict):
     if item.get("kind") not in {"new_nft", "rare_nft"}:
         return None
     buttons = [[Button.url("Открыть подарок", f"https://t.me/nft/{item['slug']}")]]
-    recipient = recipient_from_history(item.get("original_participants"))
-    if recipient:
-        url = str(recipient.get("url") or "")
-        if url.startswith("https://t.me/"):
-            buttons.append([Button.url("Профиль получателя", url)])
+    url = profile_url(item.get("owner"))
+    if url:
+        buttons.append([Button.url("Профиль владельца", url)])
     return buttons
 
 
@@ -409,6 +401,7 @@ async def recovery_worker(user: TelegramClient, bot: TelegramClient) -> None:
                             gift, extract_attributes(gift), now_utc(), rare=False
                         )
                         event["original_participants"] = history
+                        event["owner"] = await resolve_current_owner(gift, details, user)
                         if queue_new_nft(event):
                             RECOVERY_STATS["found"] += 1
                             NFT_HEALTH["last_queued_slug"] = full_slug
@@ -525,6 +518,9 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                                         collectible, attrs, now_utc(), rare=False
                                     )
                                     event["original_participants"] = history
+                                    event["owner"] = await resolve_current_owner(
+                                        collectible, details, user
+                                    )
                                     NFT_HEALTH["total_new_nfts"] += 1
                                     NFT_HEALTH["last_nft"] = str(collectible.slug)
                                     if queue_new_nft(event):
@@ -622,6 +618,7 @@ async def retry_new_recipient_details(user: TelegramClient, bot: TelegramClient)
                             unique, extract_attributes(unique), now_utc(), rare=False
                         )
                         event["original_participants"] = history
+                        event["owner"] = await resolve_current_owner(unique, details, user)
                         drop_review(state.data, slug)
                         state.save()
                         if queue_new_nft(event):
@@ -722,6 +719,7 @@ async def live_market_event(event: dict, user: TelegramClient | None = None) -> 
             pass
         alert = live_nft_notification(event)
         alert["original_participants"] = history
+        alert["owner"] = await resolve_current_owner(collectible, details, user)
         if queue_new_nft(alert):
             LIVE_COUNTERS["minute_count"] += 1
             LIVE_COUNTERS["new_notified"] += 1
