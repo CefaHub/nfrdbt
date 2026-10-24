@@ -89,6 +89,58 @@ class IntegratedLiveEvents(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(main.state.data["pending"], [])
             wake.assert_not_awaited()
 
+    async def test_deferred_recipient_recheck_recovers_and_queues(self):
+        # Mint discovered without original details; recheck later sees them.
+        from recipient_recheck import schedule_review
+        slug = "PlushPepe-500"
+        self.assertTrue(schedule_review(main.state.data, slug, now=0))
+        main.state.save()
+        checked = FakeGiftUser(slug, has_recipient=True)
+        delivered = __import__("asyncio").Event()
+
+        async def notify(_bot):
+            delivered.set()
+
+        with patch.object(main, "deliver_pending", side_effect=notify):
+            worker = __import__("asyncio").create_task(
+                main.retry_new_recipient_details(checked, None)
+            )
+            try:
+                await __import__("asyncio").wait_for(delivered.wait(), timeout=2)
+                self.assertEqual(
+                    [x["slug"] for x in main.state.data["pending"]], [slug]
+                )
+                self.assertNotIn(slug, main.state.data.get("recipient_reviews") or {})
+            finally:
+                worker.cancel()
+                with self.assertRaises(__import__("asyncio").CancelledError):
+                    await worker
+
+    async def test_deferred_no_recipient_remains_pending_for_later_retry(self):
+        from recipient_recheck import schedule_review
+        slug = "PlushPepe-501"
+        self.assertTrue(schedule_review(main.state.data, slug, now=0))
+        main.state.save()
+        visitor = FakeGiftUser(slug, has_recipient=False)
+        with patch.object(main, "deliver_pending", new_callable=AsyncMock) as notify:
+            worker = __import__("asyncio").create_task(
+                main.retry_new_recipient_details(visitor, None)
+            )
+            try:
+                for _ in range(30):
+                    await __import__("asyncio").sleep(0.01)
+                    data = main.state.data["recipient_reviews"].get(slug)
+                    if data and data["attempts"] >= 1:
+                        break
+                self.assertEqual(main.state.data["pending"], [])
+                self.assertIn(slug, main.state.data["recipient_reviews"])
+                self.assertEqual(main.state.data["recipient_reviews"][slug]["attempts"], 1)
+                notify.assert_not_awaited()
+            finally:
+                worker.cancel()
+                with self.assertRaises(__import__("asyncio").CancelledError):
+                    await worker
+
     async def test_live_api_failure_does_not_enqueue_an_unverified_gift(self):
         class BrokenUser:
             async def __call__(self, request):
