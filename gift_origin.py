@@ -8,7 +8,23 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from owner_contact import public_username
+import re
+
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,32}$")
+
+
+def public_username(entity: Any) -> str | None:
+    candidates = [getattr(entity, "username", None)]
+    candidates.extend(
+        getattr(x, "username", None)
+        for x in (getattr(entity, "usernames", None) or [])
+        if getattr(x, "active", False)
+    )
+    return next(
+        (name for name in candidates
+         if isinstance(name, str) and _USERNAME_RE.fullmatch(name)),
+        None,
+    )
 
 
 def _participant(peer: Any, role: str, response: Any) -> dict | None:
@@ -96,13 +112,3 @@ async def resolve_original_participants(unique: Any, response: Any, user: Any) -
     return results
 
 
-def original_buttons(participants: list[dict], button_factory: Any) -> list[list]:
-    labels = {
-        "sender": "🎀 Кто подарил (история)",
-        "recipient": "📥 Первый получатель",
-    }
-    buttons = []
-    for person in participants:
-        if person.get("url"):
-            buttons.append([button_factory(labels[person["role"]], person["url"])])
-    return buttons
