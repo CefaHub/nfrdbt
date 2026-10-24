@@ -39,6 +39,17 @@ class TestRadar(unittest.TestCase):
         self.state.set_paused(False)
         self.assertEqual(self.state.update_gifts([Gift("1", "Rose", 25)]), [])
 
+    def test_pause_keeps_nft_alerts_in_outbox(self):
+        self.state.set_paused(True)
+        self.state.record_nft_once({
+            "kind": "new_nft", "slug": "SnakeBox-5",
+            "original_participants": [{"role": "recipient", "type": "user",
+                                       "id": 101, "label": "Tester"}],
+        })
+        self.assertEqual(len(self.state.data["pending"]), 1)
+        self.state.set_paused(False)
+        self.assertEqual(len(RadarState(self.path).data["pending"]), 1)
+
     def test_price_change_optional(self):
         self.state.update_gifts([Gift("1", "Rose", 25)])
         self.assertEqual(self.state.update_gifts([Gift("1", "Rose", 30)]), [])
