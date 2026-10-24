@@ -9,6 +9,7 @@ os.environ.setdefault("BOT_TOKEN", "offline-dummy-token")
 import main
 from live_market import normalize_live_event
 from radar import RadarState
+from commercial import CommercialStore, ADMIN_ID
 from delivery import fallback_text
 
 
@@ -55,25 +56,32 @@ class IntegratedLiveEvents(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.old_state = main.state
+        self.old_store = main.store
         main.state = RadarState(Path(self.dir.name) / "state.json")
-        main.state.set_owner(12)
+        main.state.set_owner(ADMIN_ID)
+        main.store = CommercialStore(Path(self.dir.name) / "commercial.sqlite3")
         main.LIVE_COUNTERS["minute_bucket"] = None
         main.LIVE_COUNTERS["minute_count"] = 0
 
     def tearDown(self):
         main.state = self.old_state
+        main.store.conn.close()
+        main.store = self.old_store
         self.dir.cleanup()
 
     async def test_guest_live_mint_delivers_using_persistent_queue(self):
         event = upgrade()
         with patch.object(main, "deliver_pending", new_callable=AsyncMock) as wake:
             await main.live_market_event(event, FakeGiftUser("PlushPepe-234"))
-            self.assertEqual(len(main.state.data["pending"]), 1)
-            self.assertEqual(main.state.data["pending"][0]["slug"], "PlushPepe-234")
-            self.assertEqual(main.state.data["pending"][0]["original_participants"][0]["role"], "recipient")
+            self.assertEqual(main.state.data["pending"], [])
+            sent = main.store.next_delivery()
+            self.assertIsNotNone(sent)
+            self.assertEqual(sent[0], ADMIN_ID)
+            self.assertEqual(sent[2]["slug"], "PlushPepe-234")
+            self.assertEqual(sent[2]["original_participants"][0]["role"], "recipient")
             wake.assert_awaited_once()
         duplicate = main.state.record_nft_once(dict(
-            main.state.data["pending"][0], kind="rare_nft"
+            sent[2], kind="rare_nft"
         ))
         self.assertFalse(duplicate)
         restored = RadarState(Path(self.dir.name) / "state.json")
@@ -107,9 +115,8 @@ class IntegratedLiveEvents(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 await __import__("asyncio").wait_for(delivered.wait(), timeout=2)
-                self.assertEqual(
-                    [x["slug"] for x in main.state.data["pending"]], [slug]
-                )
+                self.assertEqual(main.state.data["pending"], [])
+                self.assertEqual(main.store.next_delivery()[2]["slug"], slug)
                 self.assertNotIn(slug, main.state.data.get("recipient_reviews") or {})
             finally:
                 worker.cancel()
