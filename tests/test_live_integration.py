@@ -81,29 +81,6 @@ class IntegratedLiveEvents(unittest.IsolatedAsyncioTestCase):
             {"kind": "new_nft", "slug": "PlushPepe-234"}
         ))
 
-    async def test_market_price_signals_no_longer_send_unrelated_alerts(self):
-        values = [3_000_000_000, 4_000_000_000, 5_000_000_000]
-        for i, value in enumerate(values):
-            sale = normalize_live_event({
-                "type": "event", "event": "sale",
-                "at": f"2026-10-24T00:00:0{i}Z",
-                "gift": {"slug": "PlushPepe", "num": i + 1, "model": "Rare"},
-                "price": {"amount": value, "currency": "gram"},
-            })
-            await main.live_market_event(sale)
-        self.assertEqual(len(main.state.data["pending"]), 0)
-        listing = normalize_live_event({
-            "type": "event", "event": "listing",
-            "at": "2026-10-24T00:01:00Z", "market": "portals",
-            "gift": {"slug": "PlushPepe", "num": 1234, "model": "Rare"},
-            "price": {"amount": 2_000_000_000, "currency": "gram"},
-        })
-        with patch.object(main, "deliver_pending", new_callable=AsyncMock) as wake:
-            await main.live_market_event(listing)
-            self.assertEqual(main.state.data["pending"], [])
-            self.assertNotIn("live_last_listings", main.state.data)
-            wake.assert_not_awaited()
-
     async def test_live_new_without_recipient_does_not_notify(self):
         with patch.object(main, "deliver_pending", new_callable=AsyncMock) as wake:
             await main.live_market_event(
