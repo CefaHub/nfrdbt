@@ -70,7 +70,6 @@ class MinimalTelegramUiTests(unittest.IsolatedAsyncioTestCase):
         buttons = nft_buttons(gift)
         self.assertEqual(len(buttons), 2)
         self.assertEqual(buttons[1][0].text, "Профиль")
-        self.assertEqual(buttons[1][0].text, "Профиль владельца")
         self.assertIn("tg://user?id=99", msg)
 
     async def test_legacy_notifications_do_not_mislabel_original_recipient(self):
