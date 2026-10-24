@@ -17,7 +17,8 @@ from radar import Gift, RadarState, now_utc
 from mint_radar import extract_attributes, make_event
 from candidate_selection import get_candidates
 from gift_origin import original_participants, resolve_original_participants
-from delivery import dispatch_next, fallback_text
+from delivery import fallback_text, is_bad_markup
+from commercial import CommercialStore, ADMIN_ID
 from scan_pacing import remaining_pause
 from recipient_filter import recipient_from_history, filter_pending
 from recipient_recheck import schedule_review, due_reviews, reschedule_review, drop_review
@@ -68,6 +69,7 @@ GIFT_COLLECTIONS = [x.strip() for x in os.getenv("GIFT_COLLECTIONS", "").split("
 DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if os.getenv("BOT_ID") else "data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 state = RadarState(DATA_DIR / "state.json")
+store = CommercialStore(DATA_DIR / "commercial.sqlite3")
 LIVE_COUNTERS = {
     "new_notified": 0,
     "new_skipped_limit": 0,
@@ -155,98 +157,115 @@ async def deliver_pending(bot: TelegramClient) -> None:
     DELIVERY_WAKE.set()
 
 
-async def delivery_worker(bot: TelegramClient) -> None:
-    """Send persisted events independently of NFT discovery.
+def queue_new_nft(item: dict) -> bool:
+    """Deduplicate at source, then put the alert into one shared SQL outbox."""
+    if not state.record_nft_once(item):
+        return False
+    # record_nft_once is persistent first: an interrupted SQLite write can
+    # always be recovered from state.pending during a restart.
+    pending_event = state.data["pending"][-1]
+    store.publish(pending_event)
+    state.pop_delivered(pending_event["event_id"])
+    return True
 
-    Event queue survives restarts. Scan tasks only enqueue and signal,
-    while this worker handles Telegram FloodWait/transport errors.
+
+def transfer_legacy_queue() -> None:
+    """Idempotently bridge alerts left by old versions or interrupted writes."""
+    legacy = list(state.data.get("pending") or [])
+    if not legacy:
+        return
+    for item in legacy:
+        if item.get("kind") in {"new_nft", "rare_nft"}:
+            store.publish(item)
+        state.pop_delivered(item["event_id"])
+
+
+async def delivery_worker(bot: TelegramClient) -> None:
+    """Fan out each NFT privately, with a durable per-subscriber cursor.
+
+    Telegram can occasionally resend after a crash between send and ACK,
+    but one failed customer cannot stall the entire broadcast permanently.
     """
-    backoff = 2.0
     while True:
-        target_id = None
+        target = None
         try:
-            removed = filter_pending(state)
-            if removed:
-                log.info("Recipient-only filter discarded %d older queued alerts", removed)
-            if not state.owner_id or state.data.get("paused") or not state.data["pending"]:
+            transfer_legacy_queue()
+            if state.data.get("paused"):
                 DELIVERY_WAKE.clear()
                 try:
-                    await asyncio.wait_for(DELIVERY_WAKE.wait(), timeout=2.0)
+                    await asyncio.wait_for(DELIVERY_WAKE.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            work = store.next_delivery()
+            if work is None:
+                DELIVERY_WAKE.clear()
+                try:
+                    await asyncio.wait_for(DELIVERY_WAKE.wait(), timeout=3.0)
                 except asyncio.TimeoutError:
                     pass
                 continue
 
-            async def send_rich(item: dict) -> None:
-                nonlocal target_id
-                target_id = item["_target_id"]
-                await send_alert(bot, target_id, message_for_gift(item), item)
-
-            async def send_plain(item: dict) -> None:
-                nonlocal target_id
-                target_id = item["_target_id"]
-                await bot.send_message(
-                    target_id,
-                    fallback_text(item),
-                    link_preview=item.get("kind") in {"new_nft", "rare_nft"},
+            target, seq, item = work
+            try:
+                await asyncio.wait_for(
+                    send_alert(bot, target, message_for_gift(item), item),
+                    timeout=45,
                 )
+                result = "sent"
+            except Exception as exc:
+                if not is_bad_markup(exc):
+                    raise
+                await asyncio.wait_for(
+                    bot.send_message(
+                        target, fallback_text(item),
+                        link_preview=item.get("kind") in {"new_nft", "rare_nft"},
+                    ), timeout=45,
+                )
+                result = "plain"
 
-            result, item = await asyncio.wait_for(
-                dispatch_next(state, send_rich, send_plain), timeout=45,
-            )
-            if result == "idle":
-                await asyncio.sleep(0.5)
-                continue
-
+            store.ack(target, seq)
             DELIVERY_STATS["sent"] += 1
             DELIVERY_STATS["plain"] += int(result == "plain")
             DELIVERY_STATS["last_sent"] = now_utc()
-            DELIVERY_STATS["last_slug"] = (item or {}).get("slug")
+            DELIVERY_STATS["last_slug"] = item.get("slug")
             DELIVERY_STATS["last_error"] = None
             DELIVERY_STATS["next_delay_sec"] = 0
-            log.info(
-                "DELIVERY OK (%s) recipient=%s nft=%s pending=%d total_sent=%d",
-                result, target_id, DELIVERY_STATS["last_slug"] or (item or {}).get("kind"),
-                len(state.data["pending"]), DELIVERY_STATS["sent"],
-            )
-            backoff = 2.0
-            # A gentle send rate avoids Telegram bot flood protection.
-            await asyncio.sleep(1.5)
+            # Do not write customer IDs to logs.
+            log.info("NFT notification delivered; remaining subscribers=%d",
+                     store.delivery_backlog())
+            await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
             raise
         except FloodWaitError as exc:
             delay = max(3, int(exc.seconds) + 3)
-            DELIVERY_STATS["last_error"] = f"FloodWait {exc.seconds} sec"
+            DELIVERY_STATS["last_error"] = f"FloodWait {exc.seconds}s"
             DELIVERY_STATS["last_error_at"] = now_utc()
             DELIVERY_STATS["retries"] += 1
             DELIVERY_STATS["next_delay_sec"] = delay
-            log.warning("DELIVERY FloodWait=%ss; saved %d pending for retry",
-                        exc.seconds, len(state.data["pending"]))
+            log.warning("Telegram delivery rate limit: %ss", delay)
             await asyncio.sleep(delay)
         except Exception as exc:
-            if (target_id is not None and target_id != state.owner_id
-                    and type(exc).__name__ in {
-                        "UserIsBlockedError", "InputUserDeactivatedError",
-                        "UserDeactivatedBanError", "ChatWriteForbiddenError",
-                        "PeerIdInvalidError",
-                    }):
-                # Never let an unreachable subscriber block the owner's NFT queue.
-                state.remove_subscriber(target_id)
-                log.warning("Removed unreachable subscriber %s: %s",
-                            target_id, type(exc).__name__)
-                backoff = 2.0
-                continue
+            name = type(exc).__name__
             DELIVERY_STATS["errors"] += 1
             DELIVERY_STATS["retries"] += 1
-            DELIVERY_STATS["last_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+            DELIVERY_STATS["last_error"] = name
             DELIVERY_STATS["last_error_at"] = now_utc()
-            DELIVERY_STATS["next_delay_sec"] = int(backoff)
-            log.exception(
-                "DELIVERY FAILED, will retry in %.1fs; queued=%d",
-                backoff, len(state.data["pending"]),
-            )
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 120.0)
+            if target is not None and name in {
+                "UserIsBlockedError", "InputUserDeactivatedError",
+                "UserDeactivatedBanError", "ChatWriteForbiddenError",
+                "PeerIdInvalidError", "UserIsBotError",
+            } and target != ADMIN_ID:
+                store.deactivate(target)
+                log.warning("A subscriber became unreachable and was disabled (%s)", name)
+            elif target is not None:
+                delay = store.retry_later(target)
+                DELIVERY_STATS["next_delay_sec"] = delay
+                log.warning("NFT delivery retry scheduled (%s) in %ss", name, delay)
+            else:
+                log.error("Delivery worker exception: %s", name)
+            await asyncio.sleep(2.0)
 
 
 # These counters are intentionally visible via /status and /diagnose.
@@ -390,7 +409,7 @@ async def recovery_worker(user: TelegramClient, bot: TelegramClient) -> None:
                             gift, extract_attributes(gift), now_utc(), rare=False
                         )
                         event["original_participants"] = history
-                        if state.record_nft_once(event):
+                        if queue_new_nft(event):
                             RECOVERY_STATS["found"] += 1
                             NFT_HEALTH["last_queued_slug"] = full_slug
                             log.info("NFT REPLAY QUEUED: %s, pending=%d",
@@ -508,7 +527,7 @@ async def monitor_rare_nfts(user: TelegramClient, bot: TelegramClient) -> None:
                                     event["original_participants"] = history
                                     NFT_HEALTH["total_new_nfts"] += 1
                                     NFT_HEALTH["last_nft"] = str(collectible.slug)
-                                    if state.record_nft_once(event):
+                                    if queue_new_nft(event):
                                         NFT_HEALTH["notified_nfts"] += 1
                                         NFT_HEALTH["discovered"] += 1
                                         NFT_HEALTH["last_found"] = now_utc()
@@ -605,7 +624,7 @@ async def retry_new_recipient_details(user: TelegramClient, bot: TelegramClient)
                         event["original_participants"] = history
                         drop_review(state.data, slug)
                         state.save()
-                        if state.record_nft_once(event):
+                        if queue_new_nft(event):
                             NFT_HEALTH["recovered"] += 1
                             NFT_HEALTH["last_queued_slug"] = slug
                             log.info("NFT RECOVERED AND QUEUED: %s pending=%d",
@@ -703,7 +722,7 @@ async def live_market_event(event: dict, user: TelegramClient | None = None) -> 
             pass
         alert = live_nft_notification(event)
         alert["original_participants"] = history
-        if state.record_nft_once(alert):
+        if queue_new_nft(alert):
             LIVE_COUNTERS["minute_count"] += 1
             LIVE_COUNTERS["new_notified"] += 1
             LIVE_COUNTERS["last_new"] = now_utc()
@@ -739,6 +758,11 @@ async def run() -> None:
 
     # A single-use secret's SHA-256 is in activation.py, NEVER the secret.
     # Used/owner state lives at /app/data/state.json and survives Bothost deploys.
+    # Retire the original /activate owner. This hardcoded Telegram ID is
+    # the only account that may access the admin panel or mint access links.
+    store.migrate_legacy(state)
+    bot_identity = {"username": None}
+
     @bot.on(events.NewMessage(incoming=True))
     async def on_command(event):
         if not event.is_private:
@@ -746,161 +770,163 @@ async def run() -> None:
         cmd, argument = command_name(event.raw_text)
         if not cmd.startswith("/"):
             return
+        sender = event.sender_id
+        if sender is None:
+            return
 
-        # Never log command arguments: they can contain invite/activation secrets.
-        log.info("Gift Radar command %s from user=%s", cmd, event.sender_id)
-
-        if state.owner_id is None:
-            if cmd == "/start" and state.consume_activation_key(
-                argument, event.sender_id
-            ):
-                await event.respond("Радар подключён.\n/status — состояние")
+        if sender != ADMIN_ID:
+            if cmd in ("/start", "/join") and argument:
+                result = store.redeem(argument, sender)
+                if result == "activated":
+                    await event.respond(
+                        "Доступ к NFT-радару активирован! Новые находки "
+                        "будут приходить сюда автоматически.\\n"
+                        "/status — состояние подписки\\n"
+                        "/stop — отключить уведомления."
+                    )
+                elif result == "existing":
+                    await event.respond(
+                        "Доступ уже активирован, уведомления включены.\\n"
+                        "/status — состояние подписки."
+                    )
+                else:
+                    await event.respond(
+                        "Эта ссылка уже использована или недействительна. "
+                        "Обратись к продавцу за новой ссылкой."
+                    )
                 await deliver_pending(bot)
-            else:
-                await event.respond("Для подключения владельца: /start КЛЮЧ")
-            return
-
-        if event.sender_id != state.owner_id:
-            if cmd in ("/join", "/start") and argument:
-                if state.accept_invite(argument, event.sender_id):
+                return
+            if store.is_subscribed(sender):
+                if cmd in ("/start", "/status", "/help", "/ping"):
                     await event.respond(
-                        "Готово, ты подключён к NFT-радару! "
-                        "Новые находки будут приходить сюда.\n"
-                        "/status — проверить подписку\n/leave — выйти"
+                        "NFT-радар активен. Новые подарки приходят автоматически.\\n"
+                        "/stop — отключить уведомления."
                     )
-                    await deliver_pending(bot)
+                elif cmd in ("/stop", "/leave"):
+                    store.deactivate(sender)
+                    await event.respond(
+                        "Уведомления выключены. Для повторного включения "
+                        "отправь /start."
+                    )
                 else:
-                    await event.respond(
-                        "Код приглашения неверный или просрочен. "
-                        "Попроси у владельца новый /invite."
-                    )
-            elif state.is_subscriber(event.sender_id):
-                if cmd in ("/start", "/help", "/status"):
-                    await event.respond(
-                        "Ты подписан на NFT Gift Radar. "
-                        "Новые подарки будут приходить автоматически.\n"
-                        f"Уведомления: {'пауза' if state.data['paused'] else 'включены'}\n"
-                        "/leave — отключить подписку"
-                    )
-                elif cmd == "/leave":
-                    state.remove_subscriber(event.sender_id)
-                    await event.respond("Подписка отключена.")
-                elif cmd in ("/ping", "/test"):
-                    await event.respond("Радар работает, подписка активна.")
-                else:
-                    await event.respond(
-                        "Эта команда доступна только владельцу радара."
-                    )
-            elif cmd in ("/start", "/help", "/activate", "/join"):
+                    await event.respond("Эта команда недоступна.")
+            elif store.has_license(sender) and cmd == "/start":
+                store.reactivate(sender)
+                await event.respond("Уведомления снова включены.")
+            elif cmd in ("/start", "/status", "/help", "/ping", "/join"):
                 await event.respond(
-                    "Это частный NFT-радар. Чтобы получать подарки, "
-                    "попроси владельца создать приглашение командой /invite.\n"
-                    "Затем отправь сюда /join КОД."
+                    "Это платный NFT-радар. Для активации открой "
+                    "персональную ссылку, полученную после покупки."
                 )
+            # Anonymous customers never see another customer's username,
+            # numeric Telegram ID, invite tokens, or any admin menu.
             return
 
-        if cmd in ("/start", "/help"):
+        if cmd in ("/start", "/help", "/admin"):
             await event.respond(
-                "<b>Gift Radar</b>\n"
-                "Новые подарки с указанным получателем.\n\n"
-                "/status — состояние\n"
-                "/invite — пригласить друга в радар\n"
-                "/friends — показать подключённых\n"
-                "/remove ID — отключить друга\n"
-                "/pushall — отправить очередь и перепроверить NFT\n"
-                "/flush — повторить отправку очереди\n"
-                "/last — последние подарки\n"
-                "/pause — отключить уведомления\n"
-                "/resume — включить уведомления",
+                "<b>Gift Radar — админ-панель</b>\\n"
+                "/invite — создать ссылку на одного покупателя\\n"
+                "/links 20 — создать партию из 20 ссылок (до 50 за запрос)\\n"
+                "/stats — только общая статистика, без пользователей\\n"
+                "/status — здоровье сканера и очереди\\n"
+                "/pushall — перепроверить пропущенные NFT\\n"
+                "/flush — разбудить рассылку\\n"
+                "/last — последние NFT\\n"
+                "/check ССЫЛКА — диагностика одного NFT\\n"
+                "/pause /resume — пауза и возобновление\\n"
+                "Ссылки одноразовые, без срока действия. "
+                "Общее количество покупателей и ссылок не ограничено кодом.",
                 parse_mode="html",
             )
-        elif cmd == "/invite":
-            code = state.create_invite()
+        elif cmd in ("/invite", "/links"):
+            amount = 1
+            if cmd == "/links":
+                if not argument.isdecimal() or not 1 <= int(argument) <= 50:
+                    await event.respond(
+                        "Формат: /links 20 (1–50 за одну команду; "
+                        "общего лимита нет, можно повторять)."
+                    )
+                    return
+                amount = int(argument)
+            username = bot_identity["username"]
+            if not username:
+                me = await bot.get_me()
+                username = me.username
+                bot_identity["username"] = username
+            codes = store.create_links(amount)
+            links = [f"https://t.me/{username}?start={code}" for code in codes]
+            # Only the hardcoded admin receives inventory links.
+            for i in range(0, len(links), 40):
+                await event.respond(
+                    "Ссылки для автовыдачи (каждая на одного покупателя):\\n"
+                    + "\\n".join(links[i:i + 40]),
+                    link_preview=False,
+                )
+        elif cmd in ("/stats", "/linkstats", "/friends"):
+            st = store.stats()
             await event.respond(
-                "Приглашение действует 24 часа и используется один раз.\n"
-                "Отправь другу эту команду (не публикуй её):\n"
-                f"/join {code}"
+                "<b>Статистика NFT-радара</b>\\n"
+                f"Активных подписок: {st['active_users']}\\n"
+                f"Всего активаций: {st['licensed_users'] - 1}\\n"
+                f"Неиспользованных ссылок: {st['unused_links']}\\n"
+                f"Активированных ссылок: {st['redeemed_links']}\\n"
+                f"Подписчиков с очередью: {st['pending_subscribers']}\\n"
+                "Данные пользователей и их Telegram ID не отображаются.",
+                parse_mode="html",
             )
-        elif cmd == "/friends":
-            friends = state.data.get("subscribers") or []
-            await event.respond(
-                "Подключённые получатели (без владельца):\n"
-                + ("\n".join(str(friend) for friend in friends)
-                   if friends else "Пока никого. Команда /invite создаёт приглашение.")
-            )
-        elif cmd == "/remove":
-            if not argument.isdigit() or int(argument) == state.owner_id:
-                await event.respond("Использование: /remove USER_ID (см. /friends)")
-            elif state.remove_subscriber(int(argument)):
-                await event.respond("Подписчик отключён.")
-                await deliver_pending(bot)
-            else:
-                await event.respond("Такого подписчика нет.")
         elif cmd == "/status":
+            st = store.stats()
             disabled = LIVE_HEALTH.get("disabled_kinds") or []
             live = LIVE_HEALTH["status"] if LIVE_ENABLED else "выключен"
             if "new" in disabled:
-                live += " (события new отключены на стороне see.tg)"
+                live += " (new отключён на see.tg)"
             await event.respond(
-                "<b>Gift Radar</b>\n"
-                f"Уведомления: {'пауза' if state.data['paused'] else 'включены'}\n"
-                "Фильтр: подарки с указанным получателем\n"
-                f"NFT-сканер: {NFT_HEALTH['sweep_progress']}/{NFT_HEALTH['candidates']} коллекций\n"
-                f"Последняя проверка: {NFT_HEALTH['last_scan_finished'] or 'нет'} UTC\n"
-                f"see.tg: {html.escape(live)}\n"
-                f"Из потока: {LIVE_COUNTERS['new_notified']}\n"
-                f"Очередь отправки: {len(state.data['pending'])}\n"
-                f"Получателей уведомлений: {len(state.recipient_ids)}\n"
-                f"Повторная проверка: {pending_count(state.data)} NFT\n"
-                f"Найдено повторно: {RECOVERY_STATS['found']}\n"
-                f"Ошибок перепроверки: {RECOVERY_STATS['errors']}\n"
-                f"Пропущено после ошибок: {state.data.get('recovery_skipped', 0)}\n"
-                f"Последний новый с получателем: {NFT_HEALTH['last_queued_slug'] or 'нет'}\n"
-                f"Последний без получателя: {NFT_HEALTH['last_filtered_slug'] or 'нет'}\n"
-                f"На повторной проверке: {len(state.data.get('recipient_reviews') or {})}\n"
-                f"Восстановлено после повтора: {NFT_HEALTH['recovered']}\n"
-                f"Последняя отправка: {DELIVERY_STATS['last_sent'] or 'нет'} UTC\n"
-                f"Доставлено: {DELIVERY_STATS['sent']}\n"
-                f"Ошибка отправки: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}",
+                "<b>Gift Radar</b>\\n"
+                f"Уведомления: {'пауза' if state.data['paused'] else 'включены'}\\n"
+                f"Подписчиков: {st['active_users']}\\n"
+                f"Ожидают уведомления: {st['pending_subscribers']}\\n"
+                f"Всего NFT-событий в базе: {st['alerts']}\\n"
+                f"Сканер: {NFT_HEALTH['sweep_progress']}/{NFT_HEALTH['candidates']} коллекций\\n"
+                f"Последняя проверка: {NFT_HEALTH['last_scan_finished'] or 'нет'} UTC\\n"
+                f"see.tg: {html.escape(live)}\\n"
+                f"Из потока: {LIVE_COUNTERS['new_notified']}\\n"
+                f"На перепроверке: {pending_count(state.data)} NFT\\n"
+                f"Последняя отправка: {DELIVERY_STATS['last_sent'] or 'нет'} UTC\\n"
+                f"Ошибок отправки: {DELIVERY_STATS['errors']}\\n"
+                f"Последняя ошибка: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}",
                 parse_mode="html",
             )
         elif cmd in ("/pushall", "/flush"):
             if state.data.get("paused"):
-                await event.respond("Уведомления на паузе. Сначала /resume.")
+                await event.respond("Сначала включи уведомления командой /resume.")
                 return
             if cmd == "/pushall" and not TRACK_RARE_NFTS:
-                await event.respond("NFT-сканер выключен (TRACK_RARE_NFTS=false).")
+                await event.respond("NFT-сканер выключен.")
                 return
-            queued = len(state.data["pending"])
+            transfer_legacy_queue()
             await deliver_pending(bot)
             if cmd == "/pushall":
                 collections, gifts = schedule_recovery(
                     state.data, RECOVERY_LOOKBACK, RECOVERY_MAX_TOTAL
                 )
-                # Re-attempt eligible gifts whose recipient details were
-                # temporarily missing on first request.
                 for job in (state.data.get("recipient_reviews") or {}).values():
                     if isinstance(job, dict):
                         job["next_at"] = 0
                 state.save()
                 RECOVERY_WAKE.set()
                 await event.respond(
-                    f"Проталкиваю очередь: {queued} уведомлений.\n"
-                    f"На перепроверку: {gifts} NFT"
-                    f" ({collections} новых задач по коллекциям).\n"
-                    "Отправка и проверка идут постепенно из-за лимитов Telegram.\n"
-                    "Прогресс: /status"
+                    f"Запущена перепроверка {gifts} NFT "
+                    f"({collections} коллекций). Рассылка пробуждена. /status"
                 )
             else:
                 await event.respond(
-                    f"Повторно запустил доставку. В очереди: {queued}.\n"
-                    "Если не приходит — смотри ошибку отправки в /status."
+                    "Рассылка пробуждена. Подписчиков с очередью: "
+                    f"{store.delivery_backlog()}."
                 )
         elif cmd == "/check":
-            # Owner-only diagnosis. Never enqueue an arbitrary older gift.
             slug = argument.strip().split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
             if not re.fullmatch(r"[A-Za-z0-9]+-[1-9][0-9]*", slug):
-                await event.respond("Пример: /check SnowMittens-40508")
+                await event.respond("Пример: /check SnakeBox-189137")
                 return
             try:
                 details = await user(
@@ -909,34 +935,19 @@ async def run() -> None:
                 gift = details.gift
                 history = original_participants(gift, details)
                 recipient = recipient_from_history(history)
-                types = [type(x).__name__ for x in (getattr(gift, "attributes", []) or [])]
-                original = "StarGiftAttributeOriginalDetails" in types
                 seen = slug in (state.data.get("seen_nft_slugs") or [])
-                queued = any(x.get("slug") == slug for x in state.data.get("pending", []))
-                review = slug in (state.data.get("recipient_reviews") or {})
-                if recipient:
-                    result = f"Есть: {html.escape(str(recipient.get('label') or recipient['id']))}"
-                else:
-                    result = (
-                        "Нет сохранённой истории подарка"
-                        if not original else "История есть, но Telegram не раскрыл получателя"
-                    )
                 await event.respond(
-                    f"<b>{html.escape(slug)}</b>\n"
-                    f"Получатель: {result}\n"
-                    f"В очереди: {'да' if queued else 'нет'}\n"
-                    f"Ранее учтён: {'да' if seen else 'нет'}\n"
-                    f"Ожидает повтор: {'да' if review else 'нет'}\n"
-                    f"Уведомления: {'пауза' if state.data['paused'] else 'включены'}\n"
-                    "Сначала проверяется получатель, затем сообщение отправляется.",
+                    f"<b>{html.escape(slug)}</b>\\n"
+                    f"Получатель: {'есть' if recipient else 'не указан'}\\n"
+                    f"Ранее учтён: {'да' if seen else 'нет'}",
                     parse_mode="html", link_preview=False,
                 )
             except FloodWaitError as exc:
                 await event.respond(f"Telegram ограничил проверку на {exc.seconds} сек.")
             except Exception as exc:
-                log.warning("Manual check failed %s: %s", slug, type(exc).__name__)
-                await event.respond(f"Не удалось проверить {html.escape(slug)}: "
-                                    f"{html.escape(type(exc).__name__)}")
+                await event.respond(
+                    "Не удалось проверить NFT: " + type(exc).__name__
+                )
         elif cmd == "/last":
             recent = [
                 item for item in reversed(state.data.get("history") or [])
@@ -948,46 +959,31 @@ async def run() -> None:
                 return
             rows = ["<b>Последние подарки</b>"]
             for item in recent:
-                slug = html.escape(item["slug"], quote=True)
+                slug = html.escape(str(item["slug"]), quote=True)
                 title = html.escape(str(item.get("title") or "NFT"))
-                recipient = recipient_from_history(item["original_participants"])
-                name = html.escape(recipient.get("label") or "Получатель")
                 rows.append(
                     f'<a href="https://t.me/nft/{slug}">'
                     f'{title} #{html.escape(str(item.get("number") or "?"))}</a>'
-                    f" — {name}"
                 )
-            await event.respond("\n".join(rows), parse_mode="html",
+            await event.respond("\\n".join(rows), parse_mode="html",
                                 link_preview=False)
         elif cmd == "/pause":
             state.set_paused(True)
-            await event.respond("Уведомления приостановлены. Очередь сохранена.")
+            await event.respond("Уведомления приостановлены, очередь сохранена.")
         elif cmd == "/resume":
             state.set_paused(False)
-            await event.respond("Уведомления включены.")
             RECOVERY_WAKE.set()
             await deliver_pending(bot)
+            await event.respond("Уведомления снова включены.")
         elif cmd == "/testdelivery":
-            # Hidden service command: test actual delivery outbox.
-            state.data["pending"].insert(0, {
-                "kind": "delivery_test",
-                "event_id": __import__("secrets").token_hex(16),
-                "targets": [state.owner_id],
-                "title": "Test",
-                "created_at": now_utc(),
-            })
-            state.save()
-            await deliver_pending(bot)
-            await event.respond("Тест поставлен в очередь.")
-        elif cmd == "/activate":
-            if state.consume_activation_key(argument, event.sender_id):
-                await event.respond("Ключ активирован.")
-            elif state.data.get("activation_consumed"):
-                await event.respond("Ключ уже использован.")
-            else:
-                await event.respond("Неверный ключ.")
-        elif cmd == "/key":
-            await event.respond("Ключ: " + state.activation_status())
+            await send_alert(
+                bot, ADMIN_ID, "Тест доставки: бот успешно отвечает.",
+                {"kind": "delivery_test"},
+            )
+        elif cmd in ("/activate", "/key", "/remove"):
+            await event.respond(
+                "Старая схема активации отключена. Используй /invite, /links и /stats."
+            )
 
     try:
         log.info("Подключаем пользовательский MTProto-аккаунт...")
@@ -1002,17 +998,8 @@ async def run() -> None:
         log.info("Подключаем бота...")
         await bot.start(bot_token=BOT_TOKEN)
         me = await bot.get_me()
-        log.info("Готово! Бот: @%s", me.username)
-        if state.owner_id is None:
-            log.info(
-                "Бот не привязан. Используй /start с одноразовым ключом, "
-                "выданным владельцу отдельно. Ключ в логи не выводится."
-            )
-        else:
-            log.info(
-                "Бот привязан к ID %s; одноразовый ключ: %s",
-                state.owner_id, state.activation_status()
-            )
+        bot_identity["username"] = me.username
+        log.info("NFT Radar connected. Commercial admin mode enabled.")
         tasks = [asyncio.create_task(delivery_worker(bot)),
                  asyncio.create_task(monitor(user, bot))]
         if LIVE_ENABLED:
