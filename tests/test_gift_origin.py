@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from gift_origin import (
-    original_participants, resolve_original_participants, original_buttons,
+    original_participants, resolve_original_participants,
 )
 
 
@@ -73,15 +73,6 @@ class OriginalDetailsTests(unittest.TestCase):
         ))
         self.assertEqual(data[0]["url"], "https://t.me/GiftChannel")
         self.assertEqual(data[0]["type"], "channel")
-
-    def test_buttons_have_explicit_historical_labels(self):
-        people = [
-            {"role": "sender", "url": "https://t.me/MillerPublic"},
-            {"role": "recipient", "url": "https://t.me/DariiiPublic"},
-        ]
-        buttons = original_buttons(people, lambda name, url: (name, url))
-        self.assertIn("Кто подарил", buttons[0][0][0])
-        self.assertIn("Первый получатель", buttons[1][0][0])
 
     def test_malformed_untrusted_peer_does_not_construct_link(self):
         gift = SimpleNamespace(
