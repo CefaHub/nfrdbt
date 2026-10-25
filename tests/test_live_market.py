@@ -66,12 +66,21 @@ async def capture(items, event):
 
 
 class LiveWebSocketTests(unittest.IsolatedAsyncioTestCase):
-    async def test_guest_subscribes_to_new_only(self):
+    async def test_guest_subscribes_to_new_and_stats(self):
         output = []
         sock = FakeSocket([mint()])
         await consume_socket(sock, lambda ev: capture(output, ev))
-        self.assertEqual(sock.sent[0], {"type": "subscribe", "events": ["new"]})
+        self.assertEqual(sock.sent[0], {"type": "subscribe", "events": ["new", "stats"]})
         self.assertEqual(len(output), 1)
+
+    async def test_stats_heartbeat_without_gift_delivery(self):
+        items = []
+        sock = FakeSocket([{"type": "stats", "events": {"new": 0}}])
+        previous = HEALTH["stats_seen"]
+        await consume_socket(sock, lambda event: capture(items, event))
+        self.assertEqual(items, [])
+        self.assertEqual(HEALTH["stats_seen"], previous + 1)
+        self.assertIsNotNone(HEALTH["last_stats"])
 
     async def test_auth_token_only_in_auth_message(self):
         sock = FakeSocket([])
