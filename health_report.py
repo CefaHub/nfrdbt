@@ -17,6 +17,42 @@ def age(value):
         return "нет данных"
 
 
+
+def health_issues(nft, live, state, *, scanner_enabled=True, live_enabled=True):
+    """Return only actionable source problems, never 'no new NFTs'."""
+    if state.get("paused"):
+        return []
+    def stale(value, maximum):
+        if not value:
+            return False
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt).total_seconds() > maximum
+        except (ValueError, TypeError):
+            return False
+
+    issues = []
+    if scanner_enabled:
+        if nft.get("last_catalog") and stale(nft.get("last_catalog"), 1200):
+            issues.append("Каталог Telegram не обновлялся больше 20 минут")
+        if nft.get("last_catalog") and not nft.get("candidates"):
+            issues.append("NFT-сканер не нашёл ни одной коллекции")
+        if (nft.get("candidates") and nft.get("last_success")
+                and stale(nft.get("last_success"), 1200)):
+            issues.append("NFT-сканер не делал успешных проверок больше 20 минут")
+    if live_enabled:
+        if live.get("status") != "подключено":
+            issues.append("see.tg не подключён")
+        if "new" in (live.get("disabled_kinds") or []):
+            issues.append("see.tg отключил поток новых NFT")
+        if ("stats" in (live.get("subscribed_kinds") or [])
+                and live.get("last_stats")
+                and stale(live.get("last_stats"), 180)):
+            issues.append("see.tg перестал присылать heartbeat")
+    return issues
+
 def diagnostic_text(nft, live, counters, delivery, state, subscribers):
     safe = lambda value: escape(str(value if value is not None else "нет"))
     rows = [
@@ -53,4 +89,8 @@ def diagnostic_text(nft, live, counters, delivery, state, subscribers):
         "Для теста доставки: /testdelivery",
         "Час без новых NFT не доказывает сбой.",
     ]
+    issues = health_issues(nft, live, state)
+    if issues:
+        rows.extend(["", "<b>⚠️ Что требует внимания</b>"])
+        rows.extend("• " + safe(issue) for issue in issues)
     return "\n".join(rows)
