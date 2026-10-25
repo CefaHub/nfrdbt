@@ -53,7 +53,8 @@ def health_issues(nft, live, state, *, scanner_enabled=True, live_enabled=True):
             issues.append("see.tg перестал присылать heartbeat")
     return issues
 
-def diagnostic_text(nft, live, counters, delivery, state, subscribers):
+def diagnostic_text(nft, live, counters, delivery, state, subscribers, *,
+                    scanner_enabled=True, live_enabled=True):
     safe = lambda value: escape(str(value if value is not None else "нет"))
     rows = [
         "<b>🩺 NFT Gift Radar — диагностика</b>",
@@ -89,7 +90,8 @@ def diagnostic_text(nft, live, counters, delivery, state, subscribers):
         "Для теста доставки: /testdelivery",
         "Час без новых NFT не доказывает сбой.",
     ]
-    issues = health_issues(nft, live, state)
+    issues = health_issues(nft, live, state, scanner_enabled=scanner_enabled,
+                           live_enabled=live_enabled)
     if issues:
         rows.extend(["", "<b>⚠️ Что требует внимания</b>"])
         rows.extend("• " + safe(issue) for issue in issues)
