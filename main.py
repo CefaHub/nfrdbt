@@ -30,6 +30,7 @@ from recovery import (schedule_recovery, current_recovery, complete_recovery_ite
                       fail_recovery_item, pending_count)
 from see_live import HEALTH as LIVE_HEALTH, run_stream
 from live_market import live_nft_notification
+from health_report import diagnostic_text
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -956,6 +957,8 @@ async def run() -> None:
                 "/buy — оплата через Stars в отдельном боте\n"
                 "/stats — аудитория, активность и продажи (без ID)\n"
                 "/status — здоровье сканера и очереди\n"
+                "/diagnose — причины тишины и работа источников\n"
+                "/testdelivery — проверить отправку\n"
                 "/pushall — перепроверить пропущенные NFT\n"
                 "/flush — разбудить рассылку\n"
                 "/last — последние NFT\n"
@@ -1041,6 +1044,12 @@ async def run() -> None:
                 f"Последняя ошибка: {html.escape(DELIVERY_STATS['last_error'] or 'нет')}",
                 parse_mode="html",
             )
+        elif cmd in ("/diagnose", "/diagnostics"):
+            details = diagnostic_text(
+                NFT_HEALTH, LIVE_HEALTH, LIVE_COUNTERS, DELIVERY_STATS,
+                state.data, max(0, store.stats()["active_users"] - 1),
+            )
+            await event.respond(details, parse_mode="html", link_preview=False)
         elif cmd in ("/pushall", "/flush"):
             if state.data.get("paused"):
                 await event.respond("Сначала включи уведомления командой /resume.")
