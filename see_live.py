@@ -15,7 +15,7 @@ import websockets
 from live_market import normalize_live_event
 
 URL = "wss://live.see.tg/v1/ws"
-EVENTS = ["new"]
+EVENTS = ["new", "stats"]
 HEALTH: dict[str, Any] = {
     "status": "не запускался", "connected_at": None,
     "last_event": None, "last_event_type": None, "events_seen": 0,
@@ -24,6 +24,7 @@ HEALTH: dict[str, Any] = {
     "disabled_kinds": [], "subscribed_kinds": [],
     "last_notice": None, "event_counts": {},
     "last_kind_enabled": None, "last_kind_disabled": None,
+    "last_stats": None, "stats_seen": 0,
 }
 
 LOG = logging.getLogger("gift-radar.live")
@@ -131,6 +132,11 @@ async def consume_socket(ws: Any, on_event: Callable[[dict], Awaitable[None]],
             HEALTH["last_kind_enabled"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             HEALTH["last_notice"] = "see.tg включил: " + ", ".join(enabled or ["неизвестный тип"])
             await ws.send(json.dumps(subscribe_packet(collections)))
+            continue
+        if kind == "stats" or (kind == "event" and msg.get("event") == "stats"):
+            # Server heartbeat is independent of any NFT creation.
+            HEALTH["last_stats"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            HEALTH["stats_seen"] += 1
             continue
         if kind != "event":
             continue
