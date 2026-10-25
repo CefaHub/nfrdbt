@@ -30,7 +30,7 @@ from recovery import (schedule_recovery, current_recovery, complete_recovery_ite
                       fail_recovery_item, pending_count)
 from see_live import HEALTH as LIVE_HEALTH, run_stream
 from live_market import live_nft_notification
-from health_report import diagnostic_text
+from health_report import diagnostic_text, health_issues
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -1048,6 +1048,7 @@ async def run() -> None:
             details = diagnostic_text(
                 NFT_HEALTH, LIVE_HEALTH, LIVE_COUNTERS, DELIVERY_STATS,
                 state.data, max(0, store.stats()["active_users"] - 1),
+                scanner_enabled=TRACK_RARE_NFTS, live_enabled=LIVE_ENABLED,
             )
             await event.respond(details, parse_mode="html", link_preview=False)
         elif cmd in ("/pushall", "/flush"):
@@ -1140,6 +1141,33 @@ async def run() -> None:
                 "/invite1d, /links1d и /stats."
             )
 
+    async def health_watchdog() -> None:
+        """Send outage alerts only to admin. Zero new gifts is not an error."""
+        await asyncio.sleep(600)  # allow initial login and source setup
+        old_issues = ()
+        last_alert = 0.0
+        while True:
+            try:
+                issues = tuple(health_issues(
+                    NFT_HEALTH, LIVE_HEALTH, state.data,
+                    scanner_enabled=TRACK_RARE_NFTS, live_enabled=LIVE_ENABLED,
+                ))
+                moment = asyncio.get_running_loop().time()
+                if issues and (issues != old_issues or moment - last_alert >= 3600):
+                    note = (
+                        "⚠️ <b>NFT Gift Radar: сбой источника</b>\n"
+                        + "\n".join("• " + html.escape(problem) for problem in issues)
+                        + "\n/diagnose — подробности. /testdelivery — тест."
+                    )
+                    await bot.send_message(ADMIN_ID, note, parse_mode="html")
+                    last_alert = moment
+                old_issues = issues
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Health watchdog error")
+            await asyncio.sleep(60)
+
     try:
         log.info("Подключаем пользовательский MTProto-аккаунт...")
         if SESSION_STRING:
@@ -1156,7 +1184,8 @@ async def run() -> None:
         bot_identity["username"] = me.username
         log.info("NFT Radar connected. Commercial admin mode enabled.")
         tasks = [asyncio.create_task(delivery_worker(bot)),
-                 asyncio.create_task(monitor(user, bot))]
+                 asyncio.create_task(monitor(user, bot)),
+                 asyncio.create_task(health_watchdog())]
         if PAYMENT_BOT_TOKEN:
             tasks.append(asyncio.create_task(StarsMerchant(
                 PAYMENT_BOT_TOKEN, store, me.username,
