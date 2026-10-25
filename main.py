@@ -328,6 +328,8 @@ async def delivery_worker(bot: TelegramClient) -> None:
                 "UserDeactivatedBanError", "ChatWriteForbiddenError",
                 "PeerIdInvalidError", "UserIsBotError",
             } and target != ADMIN_ID:
+                if name == "UserIsBlockedError":
+                    store.mark_blocked(target)
                 store.deactivate(target)
                 log.warning("A subscriber became unreachable and was disabled (%s)", name)
             elif target is not None:
@@ -845,10 +847,13 @@ async def run() -> None:
         if not event.is_private:
             return
         cmd, argument = command_name(event.raw_text)
-        if not cmd.startswith("/"):
-            return
         sender = event.sender_id
         if sender is None:
+            return
+        # Every incoming private message counts as interaction, including text
+        # without a slash. No message contents or identities are stored.
+        store.record_activity(sender)
+        if not cmd.startswith("/"):
             return
 
         if sender != ADMIN_ID:
@@ -949,7 +954,7 @@ async def run() -> None:
                 "/invite1d — доступ на 1 день, 1 ссылка\n"
                 "/links1d 20 — доступ на 1 день, 20 ссылок\n"
                 "/buy — оплата через Stars в отдельном боте\n"
-                "/stats — только общая статистика, без пользователей\n"
+                "/stats — аудитория, активность и продажи (без ID)\n"
                 "/status — здоровье сканера и очереди\n"
                 "/pushall — перепроверить пропущенные NFT\n"
                 "/flush — разбудить рассылку\n"
@@ -993,8 +998,14 @@ async def run() -> None:
         elif cmd in ("/stats", "/linkstats", "/friends"):
             st = store.stats()
             await event.respond(
-                "<b>Статистика NFT-радара</b>\n"
-                f"Активных подписок: {st['active_users']}\n"
+                "<b>📊 NFT GIFT RADAR | Статистика</b>\n\n"
+                f"👥 Всего пользователей: {st['known_users']}\n"
+                f"🟢 Активных за 5 минут: {st['active_5m']}\n"
+                f"⚡ Активных за 24 часа: {st['active_24h']}\n"
+                f"📅 Активных за 7 дней: {st['active_7d']}\n"
+                f"🔔 Подписаны на уведомления: {st['subscribed_users']}\n"
+                f"🚫 Заблокировали бота (известно): {st['blocked_users']}\n\n"
+                "<b>Продажи и доставка</b>\n"
                 f"Всего активаций: {st['licensed_users'] - 1}\n"
                 f"Неиспользованных бессрочных ссылок: {st['lifetime_links']}\n"
                 f"Неиспользованных однодневных ссылок: {st['trial_links']}\n"
@@ -1002,7 +1013,10 @@ async def run() -> None:
                 f"Действующих дневных доступов: {st['trial_active']}\n"
                 f"Истёкших дневных доступов: {st['trial_expired']}\n"
                 f"Подписчиков с очередью: {st['pending_subscribers']}\n"
-                "Данные пользователей и их Telegram ID не отображаются.",
+                "\nАктивность — по сообщениям боту, не настоящий онлайн Telegram. "
+                "История активности собирается с момента обновления; "
+                "блокировки видны только после неудачной отправки. "
+                "Telegram ID пользователей не отображаются.",
                 parse_mode="html",
             )
         elif cmd == "/status":

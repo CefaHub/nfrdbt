@@ -55,6 +55,15 @@ class CommercialStore:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            -- Track only user IDs and interaction times; never message text.
+            CREATE TABLE IF NOT EXISTS user_activity (
+                chat_id INTEGER PRIMARY KEY,
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER,
+                blocked_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_activity_last_seen
+                ON user_activity(last_seen);
         """)
         # Existing Bothost databases were created before time-limited plans.
         # ALTER instead of replacing tables, so lifetime buyers keep access.
@@ -102,6 +111,73 @@ class CommercialStore:
                 "UPDATE users SET active=1, retry_after=0, expires_at=NULL WHERE chat_id=?",
                 (ADMIN_ID,),
             )
+
+    def record_activity(self, chat_id: int) -> None:
+        """Record an incoming private message; this is NOT Telegram online status."""
+        if chat_id <= 0 or chat_id == ADMIN_ID:
+            return
+        now = int(time.time())
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO user_activity(chat_id, first_seen, last_seen) "
+                "VALUES(?,?,?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET "
+                "last_seen=excluded.last_seen, blocked_at=NULL",
+                (chat_id, now, now),
+            )
+
+    def mark_blocked(self, chat_id: int) -> None:
+        """Only call for a confirmed 'bot blocked by user' Telegram error."""
+        if chat_id <= 0 or chat_id == ADMIN_ID:
+            return
+        now = int(time.time())
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO user_activity(chat_id, first_seen, blocked_at) "
+                "VALUES(?,?,?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET "
+                "blocked_at=excluded.blocked_at",
+                (chat_id, now, now),
+            )
+
+    def activity_stats(self) -> dict[str, int]:
+        """Aggregate bot interactions; include historic licenses in total only.
+
+        Pre-deployment users have no observed last_seen, so they are NOT
+        counted as recently active until they message this bot again.
+        """
+        now = int(time.time())
+        known = self.conn.execute(
+            "SELECT COUNT(*) FROM ("
+            " SELECT chat_id FROM users WHERE chat_id<>?"
+            " UNION SELECT chat_id FROM user_activity WHERE chat_id<>?"
+            ")",
+            (ADMIN_ID, ADMIN_ID),
+        ).fetchone()[0]
+        def recent(seconds: int) -> int:
+            return int(self.conn.execute(
+                "SELECT COUNT(*) FROM user_activity "
+                "WHERE chat_id<>? AND last_seen>=? AND blocked_at IS NULL",
+                (ADMIN_ID, now - seconds),
+            ).fetchone()[0])
+        subscribed = self.conn.execute(
+            "SELECT COUNT(*) FROM users WHERE chat_id<>? AND active=1 "
+            "AND (expires_at IS NULL OR expires_at>?)",
+            (ADMIN_ID, now),
+        ).fetchone()[0]
+        blocked = self.conn.execute(
+            "SELECT COUNT(*) FROM user_activity "
+            "WHERE chat_id<>? AND blocked_at IS NOT NULL",
+            (ADMIN_ID,),
+        ).fetchone()[0]
+        return {
+            "known_users": int(known),
+            "active_5m": recent(5 * 60),
+            "active_24h": recent(24 * 60 * 60),
+            "active_7d": recent(7 * 24 * 60 * 60),
+            "subscribed_users": int(subscribed),
+            "blocked_users": int(blocked),
+        }
 
     def create_links(self, count: int, duration_days: int | None = None) -> list[str]:
         """Create one-use lifetime or 24-hour access links.
@@ -451,6 +527,7 @@ class CommercialStore:
             "AND duration_seconds IS NULL"
         ).fetchone()[0]
         return {
+            **self.activity_stats(),
             "active_users": int(active),
             "trial_active": int(trial_active),
             "trial_expired": int(trial_expired),
