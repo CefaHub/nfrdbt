@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 ADMIN_ID = 8714018880
+MONTH_SECONDS = 30 * 24 * 60 * 60
 
 
 class CommercialStore:
@@ -77,6 +78,17 @@ class CommercialStore:
                     self.conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN {column} INTEGER"
                     )
+        user_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(users)")}
+        if "plan" not in user_columns:
+            with self.conn:
+                self.conn.execute("ALTER TABLE users ADD COLUMN plan TEXT")
+        # Old databases only had lifetime and 1-day subscriptions.
+        with self.conn:
+            self.conn.execute(
+                "UPDATE users SET plan=CASE "
+                "WHEN expires_at IS NULL THEN 'lifetime' ELSE '1d' END "
+                "WHERE plan IS NULL"
+            )
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS star_orders (
                 payload TEXT PRIMARY KEY,
@@ -94,6 +106,14 @@ class CommercialStore:
                 paid_at INTEGER NOT NULL
             );
         """)
+        # An unused old "lifetime" invite is now a 30-day invite.
+        # Existing redeemed lifetime accounts are deliberately unchanged.
+        with self.conn:
+            self.conn.execute(
+                "UPDATE invites SET duration_seconds=? "
+                "WHERE redeemed_at IS NULL AND duration_seconds IS NULL",
+                (MONTH_SECONDS,),
+            )
         self._add_admin()
 
     def _max_seq(self) -> int:
@@ -108,7 +128,8 @@ class CommercialStore:
                 (ADMIN_ID, 0, int(time.time())),
             )
             self.conn.execute(
-                "UPDATE users SET active=1, retry_after=0, expires_at=NULL WHERE chat_id=?",
+                "UPDATE users SET active=1, retry_after=0, "
+                "expires_at=NULL, plan='lifetime' WHERE chat_id=?",
                 (ADMIN_ID,),
             )
 
@@ -179,14 +200,14 @@ class CommercialStore:
             "blocked_users": int(blocked),
         }
 
-    def create_links(self, count: int, duration_days: int | None = None) -> list[str]:
-        """Create one-use lifetime or 24-hour access links.
+    def create_links(self, count: int, duration_days: int = 30) -> list[str]:
+        """Create one-use 30-day (default) or 1-day access links.
 
-        Code inventory has no expiration, while a 1-day license starts only
-        when the buyer redeems a code. Existing lifetime links stay lifetime.
+        An unused link does not expire until redeemed. Subscription countdown
+        begins on the buyer's first successful activation.
         """
-        if duration_days not in (None, 1):
-            raise ValueError("Only lifetime and 1-day access are supported.")
+        if duration_days not in (1, 30):
+            raise ValueError("Only 30-day and 1-day access links are supported.")
         if not (1 <= count <= 50):
             raise ValueError("Use 1-50 links per command; repeat with no total limit.")
         now = int(time.time())
@@ -198,25 +219,25 @@ class CommercialStore:
                 self.conn.execute(
                     "INSERT INTO invites(code_hash, issued_at, duration_seconds) "
                     "VALUES(?,?,?)",
-                    (digest, now, 86400 if duration_days == 1 else None),
+                    (digest, now, duration_days * 86400),
                 )
                 created.append(code)
         return created
 
     def license_info(self, chat_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
-            "SELECT active, expires_at FROM users WHERE chat_id=?",
+            "SELECT active, expires_at, plan FROM users WHERE chat_id=?",
             (chat_id,),
         ).fetchone()
         if row is None:
             return None
-        active, expires = row
+        active, expires, plan = row
         now = int(time.time())
         return {
             "active": bool(active) and (expires is None or expires > now),
             "expired": expires is not None and expires <= now,
             "expires_at": int(expires) if expires is not None else None,
-            "plan": "1d" if expires is not None else "lifetime",
+            "plan": str(plan or ("1d" if expires is not None else "lifetime")),
         }
 
     def is_subscribed(self, chat_id: int) -> bool:
@@ -229,11 +250,10 @@ class CommercialStore:
         ).fetchone() is not None
 
     def redeem(self, code: str, chat_id: int) -> str:
-        """Atomically redeem a sale code, preserving all lifetime licenses.
+        """Redeem a timed code once, without changing existing lifetime access.
 
-        Outcomes: activated, upgraded, extended, existing, invalid.
-        Codes for already-lifetime users are NOT burned. A 1-day renewal
-        extends from current expiry, or from now if the plan has expired.
+        New 30-day or 1-day access extends the current expiry, if any.
+        Expired accounts resume from the new activation time.
         """
         if chat_id <= 0 or chat_id == ADMIN_ID:
             return "invalid"
@@ -244,7 +264,7 @@ class CommercialStore:
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             existing = self.conn.execute(
-                "SELECT expires_at FROM users WHERE chat_id=?", (chat_id,)
+                "SELECT expires_at, plan FROM users WHERE chat_id=?", (chat_id,)
             ).fetchone()
             if existing is not None and existing[0] is None:
                 # Permanent license already owned, never consume a sale link.
@@ -262,6 +282,15 @@ class CommercialStore:
                 self.conn.rollback()
                 return "invalid"
             duration = row[0]
+            # All unredeemed historic lifetime links are upgraded at startup.
+            # Guard against a concurrently introduced NULL-duration link too.
+            if duration is None:
+                duration = MONTH_SECONDS
+                self.conn.execute(
+                    "UPDATE invites SET duration_seconds=? WHERE code_hash=?",
+                    (duration, digest),
+                )
+            link_plan = "30d" if int(duration) == MONTH_SECONDS else "1d"
             changed = self.conn.execute(
                 "UPDATE invites SET redeemed_by=?, redeemed_at=? "
                 "WHERE code_hash=? AND redeemed_at IS NULL",
@@ -272,17 +301,17 @@ class CommercialStore:
                 return "invalid"
 
             if existing is None:
-                expiry = now + int(duration) if duration is not None else None
+                expiry = now + int(duration)
                 self.conn.execute(
-                    "INSERT INTO users(chat_id,active,cursor,joined_at,expires_at) "
-                    "VALUES(?,1,?,?,?)",
-                    (chat_id, self._max_seq(), now, expiry),
+                    "INSERT INTO users(chat_id,active,cursor,joined_at,expires_at,plan) "
+                    "VALUES(?,1,?,?,?,?)",
+                    (chat_id, self._max_seq(), now, expiry, link_plan),
                 )
                 result = "activated"
             else:
                 previous_expiry = int(existing[0])
-                expiry = (max(previous_expiry, now) + int(duration)
-                          if duration is not None else None)
+                expiry = max(previous_expiry, now) + int(duration)
+                plan = "30d" if (link_plan == "30d" or existing[1] == "30d") else "1d"
                 # Expired users must NOT receive old NFT backlog after renewal.
                 if previous_expiry <= now:
                     self.conn.execute(
@@ -290,10 +319,10 @@ class CommercialStore:
                         (self._max_seq(), chat_id),
                     )
                 self.conn.execute(
-                    "UPDATE users SET active=1,expires_at=?,retry_after=0,"
-                    "failures=0 WHERE chat_id=?", (expiry, chat_id),
+                    "UPDATE users SET active=1,expires_at=?,plan=?,retry_after=0,"
+                    "failures=0 WHERE chat_id=?", (expiry, plan, chat_id),
                 )
-                result = "extended" if duration is not None else "upgraded"
+                result = "extended"
             self.conn.commit()
             return result
         except BaseException:
@@ -376,14 +405,14 @@ class CommercialStore:
                 return "invalid"
             plan = row[1]
             current = self.conn.execute(
-                "SELECT expires_at FROM users WHERE chat_id=?", (buyer_id,),
+                "SELECT expires_at, plan FROM users WHERE chat_id=?", (buyer_id,),
             ).fetchone()
             if current is None:
                 expiry = now + 86400 if plan == "1d" else None
                 self.conn.execute(
-                    "INSERT INTO users(chat_id,active,cursor,joined_at,expires_at) "
-                    "VALUES(?,1,?,?,?)",
-                    (buyer_id, self._max_seq(), now, expiry),
+                    "INSERT INTO users(chat_id,active,cursor,joined_at,expires_at,plan) "
+                    "VALUES(?,1,?,?,?,?)",
+                    (buyer_id, self._max_seq(), now, expiry, plan),
                 )
             elif current[0] is not None:
                 before = int(current[0])
@@ -395,10 +424,12 @@ class CommercialStore:
                         "UPDATE users SET cursor=? WHERE chat_id=?",
                         (cursor, buyer_id),
                     )
+                next_plan = ("lifetime" if plan == "lifetime"
+                             else "30d" if current[1] == "30d" else "1d")
                 self.conn.execute(
-                    "UPDATE users SET active=1,expires_at=?,retry_after=0,"
+                    "UPDATE users SET active=1,expires_at=?,plan=?,retry_after=0,"
                     "failures=0 WHERE chat_id=?",
-                    (new_expiry, buyer_id),
+                    (new_expiry, next_plan, buyer_id),
                 )
             else:
                 # Never turn existing permanent access into a timed pass.
@@ -522,9 +553,17 @@ class CommercialStore:
             "SELECT COUNT(*) FROM invites WHERE redeemed_at IS NULL "
             "AND duration_seconds=86400"
         ).fetchone()[0]
-        lifetime_codes = self.conn.execute(
+        month_codes = self.conn.execute(
             "SELECT COUNT(*) FROM invites WHERE redeemed_at IS NULL "
-            "AND duration_seconds IS NULL"
+            "AND duration_seconds=?", (MONTH_SECONDS,),
+        ).fetchone()[0]
+        month_active = self.conn.execute(
+            "SELECT COUNT(*) FROM users WHERE active=1 AND plan='30d' "
+            "AND expires_at>?", (int(time.time()),),
+        ).fetchone()[0]
+        day_active = self.conn.execute(
+            "SELECT COUNT(*) FROM users WHERE active=1 AND plan='1d' "
+            "AND expires_at>?", (int(time.time()),),
         ).fetchone()[0]
         return {
             **self.activity_stats(),
@@ -532,7 +571,9 @@ class CommercialStore:
             "trial_active": int(trial_active),
             "trial_expired": int(trial_expired),
             "trial_links": int(trial_codes),
-            "lifetime_links": int(lifetime_codes),
+            "month_links": int(month_codes),
+            "month_active": int(month_active),
+            "day_active": int(day_active),
             "licensed_users": int(total),
             "unused_links": int(free_links),
             "redeemed_links": int(used_links),
