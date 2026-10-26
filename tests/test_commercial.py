@@ -92,9 +92,16 @@ class SalesLinksTests(unittest.TestCase):
                 self.store.create_links(1, duration_days=1)[0], 200
             ), "extended")
             self.assertEqual(self.store.license_info(200)["plan"], "30d")
-            permanent = self.store.create_star_order(200, "lifetime", 499)
+            # A legacy lifetime invoice already issued before the new
+            # pricing scheme must be honored if it was actually paid.
+            with self.store.conn:
+                self.store.conn.execute(
+                    "INSERT INTO star_orders(payload,buyer_id,plan,amount,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    ("existing-old-invoice", 200, "lifetime", 499, 6_000),
+                )
             self.assertEqual(self.store.fulfill_star_payment(
-                "lifetime-charge", permanent, 200, 499,
+                "lifetime-charge", "existing-old-invoice", 200, 499,
             ), "activated")
             self.assertEqual(self.store.license_info(200)["plan"], "lifetime")
             self.assertIsNone(self.store.license_info(200)["expires_at"])
