@@ -58,8 +58,8 @@ class MerchantPaymentTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.store.license_info(100)["expires_at"])
 
     def test_existing_lifetime_is_never_shortened(self):
-        code = self.store.create_links(1)[0]
-        self.store.redeem(code, 101)
+        lifetime = self.store.create_star_order(101, "lifetime", 499)
+        self.store.fulfill_star_payment("first-lifetime", lifetime, 101, 499)
         pay = self.store.create_star_order(101, "1d", 49)
         self.assertEqual(self.store.fulfill_star_payment(
             "charge-lifetime", pay, 101, 49
