@@ -22,11 +22,11 @@ MERCHANT_USERNAME = "nfgtrd22oplbot"
 class StarsMerchant:
     def __init__(self, token: str, store: CommercialStore,
                  radar_username: str, price_day: int,
-                 price_lifetime: int):
+                 price_month: int):
         self.token = token.strip()
         self.store = store
         self.radar_username = radar_username
-        self.prices = {"1d": price_day, "lifetime": price_lifetime}
+        self.prices = {"1d": price_day, "30d": price_month}
         self.endpoint = f"https://api.telegram.org/bot{self.token}/"
         self.offset = 0
 
@@ -56,9 +56,9 @@ class StarsMerchant:
         if self.prices["1d"] > 0:
             buttons.append([{"text": f"На 24 часа — {self.prices['1d']} ⭐",
                              "callback_data": "buy:1d"}])
-        if self.prices["lifetime"] > 0:
-            buttons.append([{"text": f"Бессрочно — {self.prices['lifetime']} ⭐",
-                             "callback_data": "buy:lifetime"}])
+        if self.prices["30d"] > 0:
+            buttons.append([{"text": f"На 30 дней — {self.prices['30d']} ⭐",
+                             "callback_data": "buy:30d"}])
         return {"inline_keyboard": buttons}
 
     async def _handle(self, session: aiohttp.ClientSession,
@@ -150,11 +150,11 @@ class StarsMerchant:
             await self.call(session, "answerCallbackQuery",
                             {"callback_query_id": callback["id"]})
             payload = self.store.create_star_order(uid, plan, price)
-            title = "NFT Radar — 24 часа" if plan == "1d" else "NFT Radar — бессрочно"
+            title = "NFT Radar — 24 часа" if plan == "1d" else "NFT Radar — 30 дней"
             description = (
                 "Доступ к мониторингу NFT-подарков на 24 часа с момента оплаты."
                 if plan == "1d" else
-                "Бессрочный доступ к работающему NFT Gift Radar."
+                "Доступ к мониторингу NFT-подарков на 30 дней с момента оплаты."
             )
             await self.call(session, "sendInvoice", {
                 "chat_id": uid, "title": title,
