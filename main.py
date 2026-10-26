@@ -886,7 +886,8 @@ async def run() -> None:
                         until = datetime.fromtimestamp(
                             info["expires_at"], tz=timezone.utc
                         ).strftime("%d.%m.%Y %H:%M UTC")
-                        plan = f"Доступ на 1 день. Активен до {until}."
+                        period = "30 дней" if info["plan"] == "30d" else "1 день"
+                        plan = f"Доступ на {period}. Активен до {until}."
                     else:
                         plan = "Бессрочный доступ активирован."
                     await event.respond(
@@ -912,7 +913,8 @@ async def run() -> None:
                         until = datetime.fromtimestamp(
                             info["expires_at"], tz=timezone.utc
                         ).strftime("%d.%m.%Y %H:%M UTC")
-                        plan = f"Доступ на 1 день до {until}"
+                        period = "30 дней" if info["plan"] == "30d" else "1 день"
+                        plan = f"Доступ на {period} до {until}"
                     await event.respond(
                         f"NFT-радар активен. {plan}.\n"
                         "Новые подарки приходят автоматически.\n"
@@ -929,9 +931,8 @@ async def run() -> None:
             elif info and info["expired"]:
                 if cmd in ("/start", "/status", "/help", "/ping", "/join"):
                     await event.respond(
-                        "Доступ на 1 день закончился. Уведомления отключены. "
-                        "Для продления или покупки бессрочного доступа "
-                        "активируй новую ссылку."
+                        "Срок доступа закончился. Уведомления отключены. "
+                        "Для продления активируй новую ссылку."
                     )
             elif info is not None:
                 if cmd == "/start" and store.reactivate(sender):
@@ -950,8 +951,8 @@ async def run() -> None:
         if cmd in ("/start", "/help", "/admin"):
             await event.respond(
                 "<b>Gift Radar — админ-панель</b>\n"
-                "/invite — бессрочный доступ, 1 ссылка\n"
-                "/links 20 — бессрочный доступ, 20 ссылок\n"
+                "/invite — доступ на 30 дней, 1 ссылка\n"
+                "/links 20 — доступ на 30 дней, 20 ссылок\n"
                 "/invite1d — доступ на 1 день, 1 ссылка\n"
                 "/links1d 20 — доступ на 1 день, 20 ссылок\n"
                 "/buy — оплата через Stars в отдельном боте\n"
@@ -964,8 +965,8 @@ async def run() -> None:
                 "/last — последние NFT\n"
                 "/check ССЫЛКА — диагностика одного NFT\n"
                 "/pause /resume — пауза и возобновление\n"
-                "Ссылки одноразовые; 24 часа отсчитываются с момента "
-                "активации дневного доступа. "
+                "Ссылки одноразовые; 1 и 30 дней отсчитываются с момента "
+                "активации соответствующего доступа. "
                 "Количество покупателей и ссылок не ограничено кодом.",
                 parse_mode="html",
             )
@@ -985,14 +986,14 @@ async def run() -> None:
                 me = await bot.get_me()
                 username = me.username
                 bot_identity["username"] = username
-            codes = store.create_links(amount, duration_days=1 if daily else None)
+            codes = store.create_links(amount, duration_days=1 if daily else 30)
             links = [f"https://t.me/{username}?start={code}" for code in codes]
             heading = (
                 "ДОСТУП НА 1 ДЕНЬ — 24 часа с активации:"
-                if daily else "БЕССРОЧНЫЙ ДОСТУП:"
+                if daily else "ДОСТУП НА 30 ДНЕЙ — с момента активации:"
             )
             # Send inventories only to the hardcoded admin. Never cross-post
-            # a daily inventory to the lifetime-product auto-delivery SKU.
+            # daily inventory to the 30-day product auto-delivery SKU.
             for i in range(0, len(links), 40):
                 await event.respond(
                     heading + "\n" + "\n".join(links[i:i + 40]),
@@ -1010,11 +1011,12 @@ async def run() -> None:
                 f"🚫 Заблокировали бота (известно): {st['blocked_users']}\n\n"
                 "<b>Продажи и доставка</b>\n"
                 f"Всего активаций: {st['licensed_users'] - 1}\n"
-                f"Неиспользованных бессрочных ссылок: {st['lifetime_links']}\n"
+                f"Неиспользованных ссылок на 30 дней: {st['month_links']}\n"
                 f"Неиспользованных однодневных ссылок: {st['trial_links']}\n"
                 f"Активированных ссылок: {st['redeemed_links']}\n"
-                f"Действующих дневных доступов: {st['trial_active']}\n"
-                f"Истёкших дневных доступов: {st['trial_expired']}\n"
+                f"Действующих 30-дневных доступов: {st['month_active']}\n"
+                f"Действующих однодневных доступов: {st['day_active']}\n"
+                f"Истёкших срочных доступов: {st['trial_expired']}\n"
                 f"Подписчиков с очередью: {st['pending_subscribers']}\n"
                 "\nАктивность — по сообщениям боту, не настоящий онлайн Telegram. "
                 "История активности собирается с момента обновления; "
