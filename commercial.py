@@ -343,7 +343,9 @@ class CommercialStore:
     def create_star_order(self, buyer_id: int, plan: str,
                           amount: int) -> str:
         """Issue an order token for exactly one buyer and a fixed XTR amount."""
-        if buyer_id <= 0 or plan not in {"1d", "lifetime"} or amount <= 0:
+        # Lifetime is no longer sold. Older invoices already present in
+        # star_orders can still be fulfilled according to their original offer.
+        if buyer_id <= 0 or plan not in {"1d", "30d"} or amount <= 0:
             raise ValueError("Invalid Telegram Stars order")
         token = "star_" + secrets.token_urlsafe(24)
         with self.conn:
@@ -404,11 +406,16 @@ class CommercialStore:
                 self.conn.rollback()
                 return "invalid"
             plan = row[1]
+            # Accept legacy issued lifetime invoices, but never issue new ones.
+            if plan not in {"1d", "30d", "lifetime"}:
+                self.conn.rollback()
+                return "invalid"
+            duration = 86400 if plan == "1d" else MONTH_SECONDS if plan == "30d" else None
             current = self.conn.execute(
                 "SELECT expires_at, plan FROM users WHERE chat_id=?", (buyer_id,),
             ).fetchone()
             if current is None:
-                expiry = now + 86400 if plan == "1d" else None
+                expiry = now + duration if duration is not None else None
                 self.conn.execute(
                     "INSERT INTO users(chat_id,active,cursor,joined_at,expires_at,plan) "
                     "VALUES(?,1,?,?,?,?)",
@@ -416,8 +423,8 @@ class CommercialStore:
                 )
             elif current[0] is not None:
                 before = int(current[0])
-                new_expiry = (max(before, now) + 86400
-                              if plan == "1d" else None)
+                new_expiry = (max(before, now) + duration
+                              if duration is not None else None)
                 cursor = self._max_seq() if before <= now else None
                 if cursor is not None:
                     self.conn.execute(
@@ -425,7 +432,8 @@ class CommercialStore:
                         (cursor, buyer_id),
                     )
                 next_plan = ("lifetime" if plan == "lifetime"
-                             else "30d" if current[1] == "30d" else "1d")
+                             else "30d" if plan == "30d" or current[1] == "30d"
+                             else "1d")
                 self.conn.execute(
                     "UPDATE users SET active=1,expires_at=?,plan=?,retry_after=0,"
                     "failures=0 WHERE chat_id=?",
