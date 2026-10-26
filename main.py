@@ -52,8 +52,10 @@ API_ID = int(os.getenv("TELEGRAM_API_ID") or os.getenv("API_ID") or TEST_API_ID)
 API_HASH = os.getenv("TELEGRAM_API_HASH") or os.getenv("API_HASH") or TEST_API_HASH
 BOT_TOKEN = required("BOT_TOKEN")
 PAYMENT_BOT_TOKEN = os.getenv("PAYMENT_BOT_TOKEN", "").strip()
-STARS_PRICE_1D = max(0, int(os.getenv("STARS_PRICE_1D", "250")))
-STARS_PRICE_LIFETIME = max(0, int(os.getenv("STARS_PRICE_LIFETIME", "3000")))
+# New variable names intentionally ignore the old Bothost values
+# STARS_PRICE_1D=250 and STARS_PRICE_LIFETIME=3000.
+STARS_PRICE_DAY = max(0, int(os.getenv("STARS_PRICE_DAY", "100")))
+STARS_PRICE_30D = max(0, int(os.getenv("STARS_PRICE_30D", "1000")))
 SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 INTERVAL = max(15, int(os.getenv("CHECK_INTERVAL", "20")))
 TRACK_RARE_NFTS = os.getenv("TRACK_RARE_NFTS", "true").lower() in {"true", "yes", "1"}
@@ -860,7 +862,7 @@ async def run() -> None:
         if sender != ADMIN_ID:
             if cmd in ("/buy", "/pay", "/payment"):
                 if not PAYMENT_BOT_TOKEN or not (
-                    STARS_PRICE_1D > 0 or STARS_PRICE_LIFETIME > 0
+                    STARS_PRICE_DAY > 0 or STARS_PRICE_30D > 0
                 ):
                     await event.respond(
                         "Оплата Stars пока не настроена. "
@@ -1191,7 +1193,7 @@ async def run() -> None:
         if PAYMENT_BOT_TOKEN:
             tasks.append(asyncio.create_task(StarsMerchant(
                 PAYMENT_BOT_TOKEN, store, me.username,
-                STARS_PRICE_1D, STARS_PRICE_LIFETIME,
+                STARS_PRICE_DAY, STARS_PRICE_30D,
             ).run()))
         if LIVE_ENABLED:
             tasks.append(asyncio.create_task(
