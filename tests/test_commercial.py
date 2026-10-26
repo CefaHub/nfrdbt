@@ -24,6 +24,7 @@ class SalesLinksTests(unittest.TestCase):
         self.assertEqual(len(self.store.create_links(50)), 50)
         self.assertEqual(self.store.stats()["unused_links"], 100)
         self.assertEqual(self.store.stats()["active_users"], 1)
+        self.assertEqual(self.store.stats()["month_links"], 100)
         with self.assertRaises(ValueError):
             self.store.create_links(51)
 
@@ -37,7 +38,8 @@ class SalesLinksTests(unittest.TestCase):
         self.assertTrue(self.store.is_subscribed(200))
         self.store.deactivate(200)
         self.assertFalse(self.store.is_subscribed(200))
-        self.assertEqual(self.store.redeem(code, 200), "existing")
+        self.assertEqual(self.store.redeem(code, 200), "invalid")
+        self.assertTrue(self.store.reactivate(200))
         self.assertTrue(self.store.is_subscribed(200))
 
     def test_day_pass_is_24_hours_from_activation_not_from_link_generation(self):
@@ -69,12 +71,13 @@ class SalesLinksTests(unittest.TestCase):
             self.store.ack(ADMIN_ID, self.store.next_delivery()[1])
             self.assertIsNone(self.store.next_delivery())
 
-    def test_day_renewal_and_lifetime_upgrade_never_downgrade(self):
+    def test_day_and_month_renewals_then_lifetime_via_stars(self):
         with patch("commercial.time.time", return_value=5_000):
             self.assertEqual(self.store.redeem(
                 self.store.create_links(1, duration_days=1)[0], 200
             ), "activated")
             self.assertEqual(self.store.license_info(200)["expires_at"], 91_400)
+            self.assertEqual(self.store.license_info(200)["plan"], "1d")
         with patch("commercial.time.time", return_value=6_000):
             self.assertEqual(self.store.redeem(
                 self.store.create_links(1, duration_days=1)[0], 200
@@ -82,13 +85,37 @@ class SalesLinksTests(unittest.TestCase):
             self.assertEqual(self.store.license_info(200)["expires_at"], 177_800)
             self.assertEqual(self.store.redeem(
                 self.store.create_links(1)[0], 200
-            ), "upgraded")
+            ), "extended")
+            self.assertEqual(self.store.license_info(200)["plan"], "30d")
+            self.assertEqual(self.store.license_info(200)["expires_at"], 177_800 + 30 * 86400)
+            self.assertEqual(self.store.redeem(
+                self.store.create_links(1, duration_days=1)[0], 200
+            ), "extended")
+            self.assertEqual(self.store.license_info(200)["plan"], "30d")
+            permanent = self.store.create_star_order(200, "lifetime", 499)
+            self.assertEqual(self.store.fulfill_star_payment(
+                "lifetime-charge", permanent, 200, 499,
+            ), "activated")
+            self.assertEqual(self.store.license_info(200)["plan"], "lifetime")
             self.assertIsNone(self.store.license_info(200)["expires_at"])
             daily = self.store.create_links(1, duration_days=1)[0]
             self.assertEqual(self.store.redeem(daily, 200), "existing")
             self.assertEqual(self.store.stats()["trial_links"], 1)
             self.assertEqual(self.store.redeem(daily, 201), "activated")
             self.assertIsNone(self.store.license_info(200)["expires_at"])
+
+    def test_month_starts_on_redeem_not_code_creation_and_expires(self):
+        with patch("commercial.time.time", return_value=100_000):
+            code = self.store.create_links(1)[0]
+            self.assertEqual(self.store.stats()["month_links"], 1)
+        with patch("commercial.time.time", return_value=250_000):
+            self.assertEqual(self.store.redeem(code, 456), "activated")
+            self.assertEqual(self.store.license_info(456)["plan"], "30d")
+            self.assertEqual(self.store.license_info(456)["expires_at"], 250_000 + 30 * 86400)
+            self.assertEqual(self.store.stats()["month_active"], 1)
+        with patch("commercial.time.time", return_value=250_000 + 30 * 86400):
+            self.assertFalse(self.store.is_subscribed(456))
+            self.assertFalse(self.store.reactivate(456))
 
     def test_expired_pass_renewal_skips_old_alerts(self):
         with patch("commercial.time.time", return_value=1_000):
@@ -128,11 +155,49 @@ class SalesLinksTests(unittest.TestCase):
             self.assertTrue(recovered.is_subscribed(123))
             self.assertIsNone(recovered.license_info(123)["expires_at"])
             self.assertTrue(recovered.is_subscribed(ADMIN_ID))
-            self.assertEqual(recovered.stats()["lifetime_links"], 0)
+            self.assertEqual(recovered.stats()["month_links"], 0)
+            self.assertEqual(recovered.license_info(123)["plan"], "lifetime")
             recovered.create_links(1, duration_days=1)
             self.assertEqual(recovered.stats()["trial_links"], 1)
         finally:
             recovered.conn.close()
+
+    def test_existing_unused_lifetime_codes_convert_in_place(self):
+        import hashlib
+        from commercial import MONTH_SECONDS
+        code = "old_unused_lifetime_link_token"
+        used = "old_redeemed_lifetime_link"
+        with self.store.conn:
+            self.store.conn.execute(
+                "INSERT INTO invites(code_hash,issued_at,redeemed_at,duration_seconds) "
+                "VALUES(?,?,NULL,NULL)",
+                (hashlib.sha256(code.encode()).hexdigest(), 1000),
+            )
+            self.store.conn.execute(
+                "INSERT INTO invites(code_hash,issued_at,redeemed_by,redeemed_at,duration_seconds) "
+                "VALUES(?,?,?, ?, NULL)",
+                (hashlib.sha256(used.encode()).hexdigest(), 1000, 999, 1001),
+            )
+            self.store.conn.execute(
+                "INSERT INTO users(chat_id,active,cursor,joined_at,expires_at,plan) "
+                "VALUES(999,1,0,1001,NULL,'lifetime')"
+            )
+        self.store.conn.close()
+        self.store = CommercialStore(self.path)
+        self.assertEqual(self.store.stats()["month_links"], 1)
+        self.assertEqual(self.store.license_info(999)["plan"], "lifetime")
+        self.assertIsNone(self.store.license_info(999)["expires_at"])
+        before = self.store.conn.execute(
+            "SELECT duration_seconds FROM invites WHERE redeemed_by=999"
+        ).fetchone()[0]
+        self.assertIsNone(before)
+        with patch("commercial.time.time", return_value=300_000):
+            self.assertEqual(self.store.redeem(code, 200), "activated")
+            self.assertEqual(self.store.license_info(200)["expires_at"], 300_000 + MONTH_SECONDS)
+        self.store.conn.close()
+        self.store = CommercialStore(self.path)
+        self.assertEqual(self.store.stats()["month_links"], 0)
+        self.assertEqual(self.store.license_info(200)["expires_at"], 300_000 + MONTH_SECONDS)
 
     def test_invalid_duration_or_invalid_link_no_access(self):
         with self.assertRaises(ValueError):
