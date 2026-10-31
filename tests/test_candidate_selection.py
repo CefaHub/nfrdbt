@@ -33,6 +33,11 @@ class CandidateSelectionTests(unittest.TestCase):
         self.assertEqual(found, [])
         self.assertEqual(unresolved, 1)
 
+    def test_myth_mask_is_scanned_even_if_catalogue_omits_it(self):
+        found, unresolved = get_candidates({}, [], {})
+        self.assertIn(("MythMask", None), found)
+        self.assertEqual(unresolved, 0)
+
     def test_manual_slug_has_priority_and_deduplicates_catalogue(self):
         gifts = {"5936013938331222567": {"title": "Plush Pepe", "upgrade_stars": 20}}
         found, unresolved = get_candidates(gifts, ["Plush Pepe", "Plush Pepe"], {})
