@@ -1,4 +1,4 @@
-"""Determine valid collectible collection scan candidates.
+""""Determine valid collectible collection scan candidates.
 
 Ordinary (non-upgradable) sticker gifts have numeric IDs but no NFT slug.
 Do not query GetResaleStarGifts or GetUniqueStarGift for those.
@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from gift_catalog import catalogue_name
 from mint_radar import collection_slug
+
+
+# Collections with a publicly confirmed NFT slug. These are scanned even if
+# Telegram temporarily omits their base gift from payments.getStarGifts.
+BUILTIN_COLLECTIONS = ("Myth Mask",)
 
 
 def get_candidates(
@@ -18,7 +23,7 @@ def get_candidates(
     seen: set[str] = set()
     unknown = 0
 
-    for name in manual_slugs:
+    for name in (*BUILTIN_COLLECTIONS, *manual_slugs):
         slug = collection_slug(name)
         if slug and slug not in seen:
             seen.add(slug)
